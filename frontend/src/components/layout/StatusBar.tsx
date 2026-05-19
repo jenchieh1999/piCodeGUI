@@ -1,26 +1,40 @@
 import { useModelStore } from '../../stores/modelStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useChatStore } from '../../stores/chatStore';
+import { useConnectionStore } from '../../stores/connectionStore';
 import { piApi } from '../../api/client';
 import { cn } from '../shared/utils';
+import { useI18n, type TranslationKey } from '../../lib/i18n';
+import type { ModelInfo, Session, ThinkingLevel } from '../../types';
 import {
-  GitBranch,
-  Cpu,
-  Zap,
-  Shield,
+  CheckCircle2,
   Circle,
+  ClipboardList,
+  Cpu,
+  GitBranch,
+  MonitorCog,
+  ShieldAlert,
+  ShieldQuestion,
+  Zap,
 } from 'lucide-react';
 
 export function StatusBar() {
-  const currentModel = useModelStore((s) => s.currentModel);
-  const thinkingLevel = useModelStore((s) => s.thinkingLevel);
+  const { t } = useI18n();
+  const globalCurrentModel = useModelStore((s) => s.currentModel);
+  const availableModels = useModelStore((s) => s.availableModels);
+  const globalThinkingLevel = useModelStore((s) => s.thinkingLevel);
   const permissionMode = useSettingsStore((s) => s.permissionMode);
   const updateSetting = useSettingsStore((s) => s.updateSetting);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sessions = useChatStore((s) => s.sessions);
-  const isConnected = true; // TODO: track from api client
+  const isConnected = useConnectionStore((s) => s.isConnected);
+  const reconnectAttempts = useConnectionStore((s) => s.reconnectAttempts);
+  const runtimeInfo = useConnectionStore((s) => s.runtimeInfo);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const currentModel = modelForSession(activeSession, availableModels, globalCurrentModel);
+  const thinkingLevel = activeSession?.thinkingLevel ?? globalThinkingLevel;
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.piDesktop);
 
   const thinkingColors: Record<string, string> = {
     off: 'text-pi-thinking-off',
@@ -31,96 +45,144 @@ export function StatusBar() {
     xhigh: 'text-pi-thinking-xhigh',
   };
 
+  const permissionMeta = {
+    ask: { label: t('status.permission.ask'), Icon: ShieldQuestion },
+    acceptEdits: { label: t('status.permission.acceptEdits'), Icon: CheckCircle2 },
+    plan: { label: t('status.permission.plan'), Icon: ClipboardList },
+    bypassPermissions: { label: t('status.permission.bypassPermissions'), Icon: ShieldAlert },
+  };
+  const PermissionIcon = permissionMeta[permissionMode].Icon;
+  const thinkingLabel = thinkingLevelLabel(thinkingLevel, t);
+
   const nextPermissionMode = () => {
     const modes: Array<'ask' | 'acceptEdits' | 'plan' | 'bypassPermissions'> = [
-      'ask', 'acceptEdits', 'plan', 'bypassPermissions',
+      'ask',
+      'acceptEdits',
+      'plan',
+      'bypassPermissions',
     ];
     const idx = modes.indexOf(permissionMode);
-    updateSetting('permissionMode', modes[(idx + 1) % modes.length]);
+    const next = modes[(idx + 1) % modes.length];
+    updateSetting('permissionMode', next);
+    piApi.send({ type: 'set_permission_mode', mode: next });
   };
 
   const nextThinkingLevel = () => {
     const levels: Array<'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'> = [
-      'off', 'minimal', 'low', 'medium', 'high', 'xhigh',
+      'off',
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
     ];
     const idx = levels.indexOf(thinkingLevel);
     const next = levels[(idx + 1) % levels.length];
-    piApi.send({ type: 'set_thinking_level', level: next });
-  };
-
-  const permissionIcons: Record<string, string> = {
-    ask: '🛡️',
-    acceptEdits: '✏️',
-    plan: '📋',
-    bypassPermissions: '⚠️',
+    piApi.send({ type: 'set_thinking_level', sessionId: activeSessionId ?? undefined, level: next });
   };
 
   return (
-    <div className="flex items-center h-7 px-3 bg-pi-bg-secondary border-t border-pi-border text-[11px] text-pi-dim select-none gap-3">
-      {/* Left: Project info */}
-      <div className="flex items-center gap-2">
+    <div className="pi-statusbar-material flex h-7 items-center gap-3 border-t px-3 text-[11px] text-pi-dim select-none">
+      <div className="flex min-w-0 items-center gap-2 rounded-full px-2 py-0.5">
         <GitBranch size={12} />
-        <span className="truncate max-w-[200px]">
+        <span className="max-w-[220px] truncate">
           {activeSession
-            ? `${activeSession.projectName}${activeSession.branch ? ` · ${activeSession.branch}` : ''}`
-            : 'No project'}
+            ? activeSession.branch
+              ? t('status.branchOn', { project: activeSession.projectName, branch: activeSession.branch })
+              : activeSession.projectName
+            : t('status.noProject')}
         </span>
       </div>
 
       <div className="flex-1" />
 
-      {/* Center: Model & Thinking */}
       <div className="flex items-center gap-3">
-        {/* Model */}
         <button
-          className="flex items-center gap-1 hover:text-pi-text transition-colors cursor-pointer"
-          title="Change model (Ctrl+L)"
+          className="flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 transition-colors hover:bg-pi-bg-hover/70 hover:text-pi-text"
+          title={t('status.changeModel')}
         >
           <Cpu size={12} />
-          <span>{currentModel?.name ?? 'No model'}</span>
+          <span>{currentModel?.name ?? t('status.noModel')}</span>
         </button>
 
-        {/* Thinking level */}
         <button
           onClick={nextThinkingLevel}
           className={cn(
-            'flex items-center gap-1 hover:text-pi-text transition-colors cursor-pointer',
+            'flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 transition-colors hover:bg-pi-bg-hover/70 hover:text-pi-text',
             thinkingColors[thinkingLevel]
           )}
-          title={`Thinking: ${thinkingLevel} (Shift+Tab)`}
+          title={t('status.thinkingCycle', { level: thinkingLabel })}
         >
           <Zap size={12} />
-          <span className="capitalize">{thinkingLevel}</span>
+          <span>{thinkingLabel}</span>
         </button>
       </div>
 
       <div className="flex-1" />
 
-      {/* Right: Permission & Connection */}
       <div className="flex items-center gap-3">
-        {/* Permission mode */}
+        {isDesktop && (
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent('pi:desktop-open-diagnostics'))}
+            className="flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 transition-colors hover:bg-pi-bg-hover/70 hover:text-pi-text"
+            title={t('status.desktopDiagnostics')}
+          >
+            <MonitorCog size={12} />
+            <span>{t('status.desktop')}</span>
+          </button>
+        )}
+
+        {runtimeInfo && (
+          <div
+            className={cn(
+              'flex items-center gap-1 rounded-full px-2 py-0.5',
+              runtimeInfo.active === 'pi' && !runtimeInfo.fallback ? 'text-pi-success' : 'text-pi-warning'
+            )}
+            title={runtimeInfo.detail ?? t('status.runtimeTitle', { mode: runtimeInfo.mode, active: runtimeInfo.active })}
+          >
+            <Cpu size={12} />
+            <span>{runtimeInfo.fallback ? t('status.mockFallback') : runtimeInfo.active === 'pi' ? t('status.piSdk') : t('status.mock')}</span>
+          </div>
+        )}
+
         <button
           onClick={nextPermissionMode}
-          className="flex items-center gap-1 hover:text-pi-text transition-colors cursor-pointer"
-          title={`Permission: ${permissionMode} (Click to cycle)`}
+          className="flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 transition-colors hover:bg-pi-bg-hover/70 hover:text-pi-text"
+          title={t('status.permissionCycle', { mode: permissionMeta[permissionMode].label })}
         >
-          <span className="text-xs">{permissionIcons[permissionMode]}</span>
-          <span className="capitalize">
-            {permissionMode === 'acceptEdits' ? 'Auto Edit' :
-             permissionMode === 'bypassPermissions' ? 'Bypass' :
-             permissionMode}
-          </span>
+          <PermissionIcon size={12} />
+          <span>{permissionMeta[permissionMode].label}</span>
         </button>
 
-        {/* Connection status */}
         <div className={cn(
-          'flex items-center gap-1',
+          'flex items-center gap-1 rounded-full px-2 py-0.5',
           isConnected ? 'text-pi-success' : 'text-pi-error'
         )}>
           <Circle size={8} fill="currentColor" />
-          <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
+          <span>
+            {isConnected
+              ? t('status.connected')
+              : reconnectAttempts > 0
+                ? t('status.reconnecting', { count: reconnectAttempts })
+                : t('status.disconnected')}
+          </span>
         </div>
       </div>
     </div>
   );
+}
+
+function modelForSession(session: Session | undefined, models: ModelInfo[], fallback: ModelInfo | null): ModelInfo | null {
+  if (!session) return fallback;
+  const provider = session.modelProvider;
+  return models.find((model) => model.id === session.modelId && (!provider || model.provider === provider))
+    ?? models.find((model) => model.id === session.modelId)
+    ?? fallback;
+}
+
+function thinkingLevelLabel(
+  level: ThinkingLevel,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  return t(`chat.thinking.${level}` as TranslationKey);
 }

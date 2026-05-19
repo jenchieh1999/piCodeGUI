@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppSettings, RightPanelType, ViewType } from '../types';
+import type { RightPanelType, SlashCommandInfo, ViewType } from '../types';
 
 interface UIState {
   // View
@@ -27,6 +27,10 @@ interface UIState {
   // Settings page tab
   settingsTab: string;
   setSettingsTab: (tab: string) => void;
+
+  // Runtime composer commands
+  slashCommands: SlashCommandInfo[];
+  setSlashCommands: (commands: SlashCommandInfo[]) => void;
 }
 
 export interface Toast {
@@ -37,6 +41,9 @@ export interface Toast {
 }
 
 let toastId = 0;
+
+const clampPanelWidth = (width: number, min: number, max: number) =>
+  Math.min(Math.max(Math.round(width), min), max);
 
 export const useUIStore = create<UIState>((set) => ({
   activeView: 'chat',
@@ -52,7 +59,7 @@ export const useUIStore = create<UIState>((set) => ({
   setRightPanel: (type) => set({ rightPanelType: type }),
   toggleRightPanel: (type) =>
     set((s) => ({ rightPanelType: s.rightPanelType === type ? null : type })),
-  setRightPanelWidth: (w) => set({ rightPanelWidth: w }),
+  setRightPanelWidth: (w) => set({ rightPanelWidth: clampPanelWidth(w, 300, 760) }),
   
   toasts: [],
   addToast: (toast) => {
@@ -69,57 +76,7 @@ export const useUIStore = create<UIState>((set) => ({
   
   settingsTab: 'general',
   setSettingsTab: (tab) => set({ settingsTab: tab }),
+
+  slashCommands: [],
+  setSlashCommands: (commands) => set({ slashCommands: commands }),
 }));
-
-// ---- Settings Store ----
-
-interface SettingsState extends AppSettings {
-  updateSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
-  loadSettings: () => void;
-}
-
-const DEFAULT_SETTINGS: AppSettings = {
-  theme: 'dark',
-  language: 'en',
-  fontSize: 13,
-  permissionMode: 'ask',
-  sidebarWidth: 280,
-  rightPanelWidth: 380,
-  rightPanelType: null,
-  showThinking: true,
-  compactOnOverflow: true,
-};
-
-export const useSettingsStore = create<SettingsState>((set) => ({
-  ...DEFAULT_SETTINGS,
-  
-  updateSetting: (key, value) => {
-    set({ [key]: value } as Partial<AppSettings>);
-    // Persist to localStorage
-    const stored = loadStoredSettings();
-    (stored as Record<string, unknown>)[key] = value;
-    localStorage.setItem('pi-desktop-settings', JSON.stringify(stored));
-    
-    // Apply theme
-    if (key === 'fontSize') {
-      document.documentElement.style.fontSize = `${value}px`;
-    }
-  },
-  
-  loadSettings: () => {
-    const stored = loadStoredSettings();
-    set(stored);
-    if (stored.fontSize) {
-      document.documentElement.style.fontSize = `${stored.fontSize}px`;
-    }
-  },
-}));
-
-function loadStoredSettings(): Partial<AppSettings> {
-  try {
-    const raw = localStorage.getItem('pi-desktop-settings');
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}

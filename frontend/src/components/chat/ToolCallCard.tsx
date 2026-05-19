@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ToolCall } from '../../types';
 import { cn, truncateMiddle } from '../shared/utils';
 import {
@@ -35,10 +35,16 @@ const STATUS_STYLES: Record<string, { bg: string; border: string; icon: typeof C
 };
 
 export function ToolCallCard({ toolCall }: ToolCallCardProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(toolCall.status === 'error');
   const statusStyle = STATUS_STYLES[toolCall.status] ?? STATUS_STYLES.pending;
   const StatusIcon = statusStyle.icon;
   const ToolIcon = TOOL_ICONS[toolCall.name] ?? Wrench;
+
+  useEffect(() => {
+    if (toolCall.status === 'error') {
+      setExpanded(true);
+    }
+  }, [toolCall.status]);
 
   // Format tool arguments for display
   const argsPreview = Object.entries(toolCall.args)

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ThinkingBlock as ThinkingBlockType } from '../../types';
-import { cn } from '../shared/utils';
+import { useI18n } from '../../lib/i18n';
 import { ChevronDown, ChevronRight, Brain } from 'lucide-react';
 
 interface ThinkingDisplayProps {
@@ -8,6 +8,7 @@ interface ThinkingDisplayProps {
 }
 
 export function ThinkingDisplay({ thinking }: ThinkingDisplayProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(thinking.isExpanded ?? false);
   const preview = thinking.content.slice(0, 120);
 
@@ -23,10 +24,10 @@ export function ThinkingDisplay({ thinking }: ThinkingDisplayProps) {
           <ChevronRight size={12} className="text-pi-dim" />
         )}
         <Brain size={12} className="text-pi-accent/60" />
-        <span className="font-medium">Thinking</span>
+        <span className="font-medium">{t('chat.thinkingTitle')}</span>
         {!expanded && (
           <span className="text-pi-dim truncate max-w-[300px] ml-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            — {preview}{thinking.content.length > 120 ? '...' : ''}
+            {preview}{thinking.content.length > 120 ? '...' : ''}
           </span>
         )}
       </button>

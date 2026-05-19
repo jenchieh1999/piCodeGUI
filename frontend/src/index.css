@@ -2,6 +2,47 @@
 
 @import "tailwindcss";
 
+@theme inline {
+  --color-pi-accent: var(--pi-accent);
+  --color-pi-border: var(--pi-border);
+  --color-pi-border-accent: var(--pi-border-accent);
+  --color-pi-border-muted: var(--pi-border-muted);
+  --color-pi-success: var(--pi-success);
+  --color-pi-error: var(--pi-error);
+  --color-pi-warning: var(--pi-warning);
+  --color-pi-muted: var(--pi-muted);
+  --color-pi-dim: var(--pi-dim);
+  --color-pi-text: var(--pi-text);
+  --color-pi-thinking-text: var(--pi-thinking-text);
+  --color-pi-bg: var(--pi-bg);
+  --color-pi-bg-secondary: var(--pi-bg-secondary);
+  --color-pi-bg-tertiary: var(--pi-bg-tertiary);
+  --color-pi-bg-hover: var(--pi-bg-hover);
+  --color-pi-titlebar-bg: var(--pi-titlebar-bg);
+  --color-pi-titlebar-text: var(--pi-titlebar-text);
+  --color-pi-titlebar-border: var(--pi-titlebar-border);
+  --color-pi-titlebar-hover: var(--pi-titlebar-hover);
+  --color-pi-titlebar-active: var(--pi-titlebar-active);
+  --color-pi-selected-bg: var(--pi-selected-bg);
+  --color-pi-user-msg-bg: var(--pi-user-msg-bg);
+  --color-pi-user-msg-text: var(--pi-user-msg-text);
+  --color-pi-custom-msg-bg: var(--pi-custom-msg-bg);
+  --color-pi-custom-msg-text: var(--pi-custom-msg-text);
+  --color-pi-custom-msg-label: var(--pi-custom-msg-label);
+  --color-pi-tool-pending-bg: var(--pi-tool-pending-bg);
+  --color-pi-tool-success-bg: var(--pi-tool-success-bg);
+  --color-pi-tool-error-bg: var(--pi-tool-error-bg);
+  --color-pi-tool-title: var(--pi-tool-title);
+  --color-pi-tool-output: var(--pi-tool-output);
+  --color-pi-thinking-off: var(--pi-thinking-off);
+  --color-pi-thinking-minimal: var(--pi-thinking-minimal);
+  --color-pi-thinking-low: var(--pi-thinking-low);
+  --color-pi-thinking-medium: var(--pi-thinking-medium);
+  --color-pi-thinking-high: var(--pi-thinking-high);
+  --color-pi-thinking-xhigh: var(--pi-thinking-xhigh);
+  --font-display: var(--font-display);
+}
+
 /* ============================================================
    Pi Desktop - Design Tokens & Base Styles
    ============================================================ */
@@ -13,6 +54,14 @@
 }
 .scrollbar-none::-webkit-scrollbar {
   display: none;
+}
+
+.app-region-drag {
+  -webkit-app-region: drag;
+}
+
+.app-region-no-drag {
+  -webkit-app-region: no-drag;
 }
 
 /* Font families */
@@ -38,6 +87,18 @@
   --pi-bg-secondary: #1e1e24;
   --pi-bg-tertiary: #24242a;
   --pi-bg-hover: #2a2a32;
+  --pi-shell-bg: color-mix(in srgb, var(--pi-bg) 92%, black 8%);
+  --pi-material-sidebar: color-mix(in srgb, var(--pi-bg-secondary) 78%, transparent);
+  --pi-material-chrome: color-mix(in srgb, var(--pi-titlebar-bg) 78%, transparent);
+  --pi-material-panel: color-mix(in srgb, var(--pi-bg-secondary) 84%, transparent);
+  --pi-material-control: color-mix(in srgb, var(--pi-bg-tertiary) 82%, transparent);
+  --pi-material-highlight: color-mix(in srgb, var(--pi-accent) 14%, transparent);
+  --pi-hairline: color-mix(in srgb, var(--pi-border) 68%, transparent);
+  --pi-titlebar-bg: #151519;
+  --pi-titlebar-text: #e0e0e8;
+  --pi-titlebar-border: #2a2a2e;
+  --pi-titlebar-hover: #24242a;
+  --pi-titlebar-active: #2d2d38;
 
   --pi-selected-bg: #2d2d38;
   --pi-user-msg-bg: #2d2d38;
@@ -104,12 +165,102 @@ html, body, #root {
 
 body {
   font-family: var(--font-sans);
-  background-color: var(--pi-bg);
+  background-color: var(--pi-shell-bg);
   color: var(--pi-text);
   font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Desktop shell materials */
+.pi-shell {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--pi-bg-secondary) 24%, transparent), transparent 36%),
+    var(--pi-shell-bg);
+}
+
+.pi-titlebar-material,
+.pi-sidebar-material,
+.pi-panel-material,
+.pi-statusbar-material {
+  backdrop-filter: saturate(1.25) blur(22px);
+  -webkit-backdrop-filter: saturate(1.25) blur(22px);
+}
+
+.pi-titlebar-material {
+  background: var(--pi-material-chrome);
+  border-color: var(--pi-hairline);
+  box-shadow: inset 0 -1px color-mix(in srgb, white 6%, transparent);
+}
+
+.pi-sidebar-material {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 5%, transparent), transparent 38%),
+    var(--pi-material-sidebar);
+  border-color: var(--pi-hairline);
+}
+
+.pi-panel-material {
+  background: var(--pi-material-panel);
+  border-color: var(--pi-hairline);
+}
+
+.pi-statusbar-material {
+  background: color-mix(in srgb, var(--pi-titlebar-bg) 70%, transparent);
+  border-color: var(--pi-hairline);
+}
+
+.pi-reader-toolbar-material {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent 70%),
+    color-mix(in srgb, var(--pi-titlebar-bg) 42%, var(--pi-bg-secondary));
+  border-color: var(--pi-hairline);
+  box-shadow:
+    inset 0 1px color-mix(in srgb, white 5%, transparent),
+    inset 0 -1px color-mix(in srgb, black 14%, transparent);
+  backdrop-filter: saturate(1.18) blur(20px);
+  -webkit-backdrop-filter: saturate(1.18) blur(20px);
+}
+
+.pi-composer-material {
+  background: color-mix(in srgb, var(--pi-bg) 86%, transparent);
+  border-color: var(--pi-hairline);
+  box-shadow: inset 0 1px color-mix(in srgb, white 5%, transparent);
+  backdrop-filter: saturate(1.2) blur(18px);
+  -webkit-backdrop-filter: saturate(1.2) blur(18px);
+}
+
+.pi-glass-control {
+  background: var(--pi-material-control);
+  border: 1px solid var(--pi-hairline);
+  box-shadow: inset 0 1px color-mix(in srgb, white 7%, transparent), 0 6px 24px color-mix(in srgb, black 16%, transparent);
+}
+
+.pi-glass-menu {
+  background: color-mix(in srgb, var(--pi-bg-secondary) 92%, transparent);
+  border: 1px solid var(--pi-hairline);
+  box-shadow: 0 18px 55px color-mix(in srgb, black 34%, transparent);
+  backdrop-filter: saturate(1.25) blur(24px);
+  -webkit-backdrop-filter: saturate(1.25) blur(24px);
+}
+
+.pi-sidebar-row {
+  box-shadow: inset 0 1px color-mix(in srgb, white 4%, transparent);
+}
+
+.pi-xterm .xterm {
+  height: 100%;
+  padding: 2px 0;
+}
+
+.pi-xterm .xterm-viewport,
+.pi-xterm .xterm-screen {
+  background: transparent !important;
+}
+
+.pi-xterm .xterm-viewport::-webkit-scrollbar {
+  width: 6px;
 }
 
 /* Scrollbar styling */
@@ -134,10 +285,27 @@ body {
   color: var(--pi-text);
 }
 
+.pi-selectable,
+.pi-selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.pi-selectable button,
+.pi-selectable [role="button"] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* Focus ring */
 *:focus-visible {
   outline: 1px solid var(--pi-accent);
   outline-offset: -1px;
+}
+
+.pi-embedded-input:focus,
+.pi-embedded-input:focus-visible {
+  outline: none;
 }
 
 /* Code font */
@@ -249,6 +417,19 @@ code, pre, .font-mono {
   text-align: left;
 }
 .markdown-body th { background: var(--pi-bg-tertiary); font-weight: 600; }
+
+.pi-search-highlight {
+  background: color-mix(in srgb, var(--pi-warning) 45%, transparent);
+  color: var(--pi-text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.pi-search-highlight-current {
+  background: var(--pi-accent);
+  color: #fff;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--pi-accent) 70%, #fff);
+}
 
 /* Toast animations */
 @keyframes toast-in {

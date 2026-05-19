@@ -1,0 +1,29 @@
+appId: works.pi-agent.desktop
+productName: Pi Agent Desktop
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+files:
+  - package.json
+  - desktop/**/*
+  - frontend/dist/**/*
+  - pi-server/dist/**/*
+asar: true
+asarUnpack:
+  - pi-server/dist/**/*
+  - node_modules/**/*
+npmRebuild: false
+nodeGypRebuild: false
+win:
+  icon: desktop/assets/pi-icon.ico
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - ia32
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false

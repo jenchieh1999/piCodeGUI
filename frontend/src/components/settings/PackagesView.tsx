@@ -1,9 +1,11 @@
 import { useExtensionStore } from '../../stores/extensionStore';
 import { useUIStore } from '../../stores/uiStore';
 import { piApi } from '../../api/client';
-import { ArrowLeft, Package, Download, Trash2, Puzzle, BookOpen, FileText, Palette } from 'lucide-react';
+import { useI18n } from '../../lib/i18n';
+import { ArrowLeft, Package, Trash2, Puzzle, BookOpen, Palette } from 'lucide-react';
 
 export function PackagesView() {
+  const { t } = useI18n();
   const packages = useExtensionStore((s) => s.packages);
   const setActiveView = useUIStore((s) => s.setActiveView);
 
@@ -13,21 +15,19 @@ export function PackagesView() {
         <button
           onClick={() => setActiveView('chat')}
           className="w-7 h-7 rounded-md flex items-center justify-center hover:bg-pi-bg-hover text-pi-dim hover:text-pi-text transition-colors"
+          title={t('common.backToChat')}
         >
           <ArrowLeft size={16} />
         </button>
-        <h1 className="text-sm font-display font-semibold text-pi-text">Pi Packages</h1>
+        <h1 className="text-sm font-display font-semibold text-pi-text">{t('packages.title')}</h1>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
         {packages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-pi-dim gap-3">
             <Package size={32} strokeWidth={1} />
-            <p className="text-xs">No packages installed</p>
-            <p className="text-[10px]">
-              Use <code className="font-mono bg-pi-bg-tertiary px-1 rounded">pi install</code> or
-              install from the marketplace
-            </p>
+            <p className="text-xs">{t('packages.empty')}</p>
+            <p className="text-[10px]">{t('packages.emptyHint')}</p>
           </div>
         ) : (
           <div className="space-y-2">
@@ -64,7 +64,7 @@ export function PackagesView() {
                 <button
                   onClick={() => piApi.send({ type: 'package_remove', source: pkg.source })}
                   className="text-pi-dim hover:text-pi-error transition-colors"
-                  title="Uninstall"
+                  title={t('packages.uninstall')}
                 >
                   <Trash2 size={13} />
                 </button>

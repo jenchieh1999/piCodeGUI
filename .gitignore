@@ -1,7 +1,10 @@
 node_modules
 dist
+release
 target
 .env
 *.log
+*.tsbuildinfo
+.pi-agent-desktop/
 .DS_Store
 Thumbs.db

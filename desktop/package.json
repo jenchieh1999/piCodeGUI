@@ -1,0 +1,12 @@
+{
+  "name": "pi-desktop-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for Pi Agent Desktop",
+  "main": "main.cjs",
+  "scripts": {
+    "dev": "node run-electron.cjs --dev",
+    "start": "node run-electron.cjs",
+    "smoke": "node run-electron.cjs --smoke"
+  }
+}

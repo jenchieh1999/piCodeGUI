@@ -3,14 +3,48 @@
   "version": "0.1.0",
   "private": true,
   "description": "Pi Agent Desktop - A modern desktop GUI for pi coding agent",
+  "author": "Pi Agent Desktop Contributors",
+  "main": "desktop/main.cjs",
+  "workspaces": [
+    "frontend",
+    "pi-server",
+    "desktop"
+  ],
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.74.1",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
+    "electron-updater": "^6.8.3"
+  },
   "scripts": {
     "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:server\"",
-    "dev:frontend": "cd frontend && npm run dev",
-    "dev:server": "cd pi-server && npx tsx watch index.ts",
+    "desktop:dev": "npm run dev:desktop",
+    "desktop:preview": "npm run build && npm --workspace desktop run start",
+    "desktop:pack": "npm run build && electron-builder --dir --config electron-builder.yml",
+    "desktop:dist": "npm run build && electron-builder --config electron-builder.yml",
+    "desktop:smoke": "npm run build:server && npm --workspace desktop run smoke",
+    "desktop:smoke:packaged": "node desktop/smoke-packaged.cjs",
+    "server:smoke": "npm run build:server && node pi-server/protocol-smoke.cjs",
+    "quality": "node scripts/quality-gate.cjs",
+    "quality:release": "node scripts/quality-gate.cjs --packaged",
+    "dev:desktop": "concurrently \"npm run dev:frontend\" \"npm --workspace desktop run dev\"",
+    "dev:frontend": "npm --workspace frontend run dev",
+    "dev:server": "npm --workspace pi-server run dev",
+    "install:all": "npm install",
     "build": "npm run build:frontend && npm run build:server",
-    "build:frontend": "cd frontend && npm run build",
-    "build:server": "cd pi-server && npx tsx build.ts"
+    "build:frontend": "npm --workspace frontend run build",
+    "build:server": "npm --workspace pi-server run build",
+    "typecheck": "npm run typecheck:frontend && npm run typecheck:server",
+    "typecheck:frontend": "npm --workspace frontend exec -- tsc -b",
+    "typecheck:server": "npm --workspace pi-server exec -- tsc --noEmit"
   },
-  "keywords": ["pi-package", "pi-desktop"],
-  "license": "MIT"
+  "keywords": [
+    "pi-package",
+    "pi-desktop"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1"
+  }
 }

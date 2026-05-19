@@ -5,15 +5,23 @@
 export interface SessionData {
   id: string;
   title: string;
+  titleSource?: SessionTitleSourceData;
   projectPath: string;
   projectName: string;
   branch?: string;
+  parentSessionId?: string;
+  forkedFromMessageId?: string;
+  forkedAt?: number;
+  modelProvider?: string;
   modelId: string;
+  thinkingLevel?: ThinkingLevel;
   createdAt: number;
   updatedAt: number;
   status: 'idle' | 'running' | 'error';
   messageCount: number;
 }
+
+export type SessionTitleSourceData = 'default' | 'auto' | 'manual';
 
 export interface ModelData {
   id: string;
@@ -59,6 +67,58 @@ export interface ThemeData {
   colors: Record<string, string>;
 }
 
+export type ChannelProviderData = 'feishu' | 'wechat';
+
+export interface ChannelConfigData {
+  id: string;
+  provider: ChannelProviderData;
+  name: string;
+  enabled: boolean;
+  webhookUrl?: string;
+  verificationToken?: string;
+  signingSecret?: string;
+  encryptionKey?: string;
+  appId?: string;
+  appSecret?: string;
+  defaultRecipientId?: string;
+  lastRecipientId?: string;
+  defaultProjectPath?: string;
+  defaultSessionId?: string;
+  autoCreateSession: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastEventAt?: number;
+  lastError?: string;
+  lastTestAt?: number;
+}
+
+export interface ChannelInboundEventData {
+  channelId: string;
+  provider: ChannelProviderData;
+  text: string;
+  chatId?: string;
+  userId?: string;
+  userName?: string;
+  messageId?: string;
+  replyFromUserId?: string;
+  replyToUserId?: string;
+  raw?: unknown;
+}
+
+export interface AgentConfigData {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  enabled: boolean;
+  modelProvider?: string;
+  modelId?: string;
+  projectPath?: string;
+  channelIds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface FileChangeData {
   path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed';
@@ -91,6 +151,56 @@ export interface PermissionRequestData {
   args: Record<string, unknown>;
   message: string;
   risk: 'low' | 'medium' | 'high';
+  preview?: PermissionPreviewData;
+}
+
+export type PermissionPreviewData =
+  | {
+      kind: 'bash';
+      command: string;
+      cwd?: string;
+    }
+  | {
+      kind: 'file';
+      path: string;
+      operation: 'edit' | 'write';
+      diff?: string;
+      summary?: string;
+      truncated?: boolean;
+    };
+
+export type PermissionScopeData = 'session' | 'project' | 'global';
+
+export interface PermissionRuleData {
+  id: string;
+  toolName: string;
+  scope: PermissionScopeData;
+  sessionId?: string;
+  projectPath?: string;
+  commandPrefix?: string;
+  pathPattern?: string;
+  riskMax: PermissionRequestData['risk'];
+  description: string;
+  createdAt: number;
+  updatedAt: number;
+  useCount: number;
+  lastUsedAt?: number;
+}
+
+export interface PermissionAuditEntryData {
+  id: string;
+  timestamp: number;
+  sessionId: string;
+  projectPath?: string;
+  toolName: string;
+  action: PermissionAction;
+  scope?: PermissionScopeData;
+  risk: PermissionRequestData['risk'];
+  command?: string;
+  path?: string;
+  ruleId?: string;
+  reason?: string;
+  message?: string;
 }
 
 export interface TokenUsageData {
@@ -101,16 +211,110 @@ export interface TokenUsageData {
   cost: number;
 }
 
+export type MessageRoleData = 'user' | 'assistant' | 'tool';
+
+export interface ThinkingBlockData {
+  content: string;
+  isExpanded?: boolean;
+}
+
+export interface MessageContentData {
+  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'permission_request';
+  text?: string;
+  toolUse?: ToolUseData;
+  toolResult?: ToolResultData;
+  thinking?: ThinkingBlockData;
+  permissionRequest?: PermissionRequestData;
+}
+
+export interface ToolCallData extends ToolUseData {
+  status: 'pending' | 'running' | 'success' | 'error';
+  result?: ToolResultData;
+}
+
+export interface ChatMessageData {
+  id: string;
+  sessionId: string;
+  role: MessageRoleData;
+  content: MessageContentData[];
+  timestamp: number;
+  usage?: TokenUsageData;
+  thinking?: ThinkingBlockData;
+  toolCalls?: ToolCallData[];
+  isStreaming?: boolean;
+}
+
+export type PermissionAction = 'allow' | 'always_allow' | 'deny';
+export type PermissionModeData = 'ask' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+
+export interface RuntimeInfoData {
+  mode: 'mock' | 'pi' | 'auto';
+  active: 'mock' | 'pi';
+  fallback: boolean;
+  detail?: string;
+}
+
+export interface SlashCommandData {
+  name: string;
+  description: string;
+  category?: string;
+  source?: 'runtime' | 'extension' | 'builtin';
+  insertText?: string;
+}
+
+export interface RecentProjectData {
+  projectPath: string;
+  realPath: string;
+  projectName: string;
+  branch: string | null;
+  updatedAt: number;
+  sessionCount: number;
+  lastSessionId?: string;
+  isGitRepo: boolean;
+  missing?: boolean;
+}
+
+export interface RepositoryBranchInfoData {
+  name: string;
+  current: boolean;
+  local: boolean;
+  remote: boolean;
+  remoteRef?: string;
+  checkedOut: boolean;
+  worktreePath?: string;
+}
+
+export interface RepositoryWorktreeInfoData {
+  path: string;
+  branch: string | null;
+  current: boolean;
+}
+
+export interface RepositoryContextResultData {
+  state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error';
+  workDir: string;
+  repoRoot: string | null;
+  repoName: string | null;
+  currentBranch: string | null;
+  defaultBranch: string | null;
+  dirty: boolean;
+  branches: RepositoryBranchInfoData[];
+  worktrees: RepositoryWorktreeInfoData[];
+  error?: string;
+}
+
 // WebSocket protocol messages
 export type WsClientMsg =
   | { type: 'prompt'; sessionId: string; message: string; images?: Array<{ data: string; mimeType: string }> }
-  | { type: 'steer'; sessionId: string; message: string }
-  | { type: 'follow_up'; sessionId: string; message: string }
-  | { type: 'permission_response'; sessionId: string; response: { action: 'allow' | 'always_allow' | 'deny'; requestId: string } }
+  | { type: 'steer'; sessionId: string; message: string; images?: Array<{ data: string; mimeType: string }> }
+  | { type: 'follow_up'; sessionId: string; message: string; images?: Array<{ data: string; mimeType: string }> }
+  | { type: 'permission_response'; sessionId: string; response: { action: PermissionAction; requestId: string; scope?: PermissionScopeData } }
+  | { type: 'set_permission_mode'; mode: PermissionModeData }
   | { type: 'stop_generation'; sessionId: string }
-  | { type: 'set_model'; modelId: string; provider: string }
-  | { type: 'set_thinking_level'; level: ThinkingLevel }
-  | { type: 'session_create'; projectPath: string }
+  | { type: 'set_model'; modelId: string; provider: string; sessionId?: string }
+  | { type: 'auth_refresh' }
+  | { type: 'set_thinking_level'; level: ThinkingLevel; sessionId?: string }
+  | { type: 'session_create'; projectPath: string; branch?: string | null; worktree?: boolean }
   | { type: 'session_delete'; sessionId: string }
   | { type: 'session_rename'; sessionId: string; title: string }
   | { type: 'session_tree_navigate'; sessionId: string; targetId: string }
@@ -119,10 +323,26 @@ export type WsClientMsg =
   | { type: 'package_install'; source: string }
   | { type: 'package_remove'; source: string }
   | { type: 'theme_set'; name: string }
+  | { type: 'terminal_start'; sessionId: string; terminalId?: string; cols?: number; rows?: number }
+  | { type: 'terminal_input'; terminalId: string; data: string }
+  | { type: 'terminal_resize'; terminalId: string; cols: number; rows: number }
+  | { type: 'terminal_stop'; terminalId: string }
   | { type: 'ping' };
 
 export type WsServerMsg =
-  | { type: 'connected'; sessions: SessionData[]; currentModel: ModelData; thinkingLevel: ThinkingLevel }
+  | {
+      type: 'connected';
+      sessions: SessionData[];
+      currentModel: ModelData;
+      thinkingLevel: ThinkingLevel;
+      providers?: ProviderData[];
+      packages?: PackageData[];
+      extensions?: ExtensionData[];
+      themes?: ThemeData[];
+      messagesBySession?: Record<string, ChatMessageData[]>;
+      runtimeInfo?: RuntimeInfoData;
+      slashCommands?: SlashCommandData[];
+    }
   | { type: 'status'; sessionId: string; status: 'idle' | 'running' | 'error'; detail?: string }
   | { type: 'text_delta'; sessionId: string; delta: string }
   | { type: 'text_start'; sessionId: string; messageId: string }
@@ -134,18 +354,25 @@ export type WsServerMsg =
   | { type: 'tool_result'; sessionId: string; result: ToolResultData }
   | { type: 'permission_request'; sessionId: string; request: PermissionRequestData }
   | { type: 'message_complete'; sessionId: string; messageId: string; usage: TokenUsageData }
+  | { type: 'message_added'; sessionId: string; message: ChatMessageData }
   | { type: 'session_updated'; session: SessionData }
-  | { type: 'session_created'; session: SessionData }
+  | { type: 'session_created'; session: SessionData; messages?: ChatMessageData[] }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'queue_update'; sessionId: string; steering: number; followUp: number }
   | { type: 'compaction_start'; sessionId: string }
   | { type: 'compaction_end'; sessionId: string }
   | { type: 'error'; sessionId?: string; message: string; code?: string }
   | { type: 'pong' }
-  | { type: 'model_updated'; model: ModelData; thinkingLevel: ThinkingLevel }
+  | { type: 'model_updated'; model: ModelData; thinkingLevel: ThinkingLevel; sessionId?: string }
   | { type: 'providers_updated'; providers: ProviderData[] }
   | { type: 'themes_updated'; themes: ThemeData[] }
   | { type: 'packages_updated'; packages: PackageData[] }
   | { type: 'extensions_updated'; extensions: ExtensionData[] }
+  | { type: 'runtime_updated'; runtimeInfo: RuntimeInfoData }
+  | { type: 'slash_commands_updated'; commands: SlashCommandData[] }
   | { type: 'file_changes'; sessionId: string; changes: FileChangeData[] }
-  | { type: 'git_info'; sessionId: string; git: GitData };
+  | { type: 'git_info'; sessionId: string; git: GitData }
+  | { type: 'terminal_started'; sessionId: string; terminalId: string; cwd: string; shell: string; backend: 'pty' | 'pipe' }
+  | { type: 'terminal_output'; terminalId: string; data: string }
+  | { type: 'terminal_exited'; terminalId: string; exitCode: number | null; signal: string | null }
+  | { type: 'terminal_error'; sessionId?: string; terminalId?: string; message: string };

@@ -1,6 +1,6 @@
 // ============================================================
 // Pi Agent Server - Build Script
-// Compiles the server into a standalone bundle
+// Compiles the server into a standalone Node bundle.
 // ============================================================
 
 import { build } from 'esbuild';
@@ -11,19 +11,18 @@ async function main() {
     bundle: true,
     platform: 'node',
     target: 'node20',
-    format: 'esm',
-    outfile: './dist/server.js',
+    format: 'cjs',
+    outfile: './dist/server.cjs',
     external: [
       '@earendil-works/pi-coding-agent',
-      '@earendil-works/pi-ai',
-      '@earendil-works/pi-agent-core',
-      '@earendil-works/pi-tui',
+      '@homebridge/node-pty-prebuilt-multiarch',
+      '@mariozechner/clipboard',
     ],
     sourcemap: true,
     minify: false,
   });
 
-  console.log('✅ Server built to dist/server.js');
+  console.log('Server built to dist/server.cjs');
 }
 
 main().catch((err) => {

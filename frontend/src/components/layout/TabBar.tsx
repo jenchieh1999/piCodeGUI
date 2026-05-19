@@ -1,13 +1,14 @@
 import { useChatStore } from '../../stores/chatStore';
 import { useUIStore } from '../../stores/uiStore';
+import { piApi } from '../../api/client';
 import { cn } from '../shared/utils';
 import { X, ChevronLeft, ChevronRight } from 'lucide-react';
+import type React from 'react';
 
 export function TabBar() {
   const sessions = useChatStore((s) => s.sessions);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const setActiveSession = useChatStore((s) => s.setActiveSession);
-  const removeSession = useChatStore((s) => s.removeSession);
   const sessionStatuses = useChatStore((s) => s.sessionStatuses);
   const activeView = useUIStore((s) => s.activeView);
   const setActiveView = useUIStore((s) => s.setActiveView);
@@ -20,10 +21,10 @@ export function TabBar() {
     const status = sessionStatuses[sessionId];
     if (status === 'running') {
       if (confirm('This session is still running. Stop and close?')) {
-        removeSession(sessionId);
+        piApi.send({ type: 'session_delete', sessionId });
       }
     } else {
-      removeSession(sessionId);
+      piApi.send({ type: 'session_delete', sessionId });
     }
   };
 
@@ -42,14 +43,23 @@ export function TabBar() {
           const isRunning = status === 'running';
 
           return (
-            <button
+            <div
               key={session.id}
               onClick={() => {
                 setActiveSession(session.id);
                 setActiveView('chat');
               }}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActiveSession(session.id);
+                  setActiveView('chat');
+                }
+              }}
               className={cn(
-                'group flex items-center gap-1.5 h-7 px-2.5 rounded-md text-xs font-medium transition-colors flex-shrink-0 max-w-[180px]',
+                'group flex items-center gap-1.5 h-7 px-2.5 rounded-md text-xs font-medium transition-colors flex-shrink-0 max-w-[180px] cursor-default',
                 isActive
                   ? 'bg-pi-bg text-pi-text'
                   : 'text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
@@ -66,9 +76,9 @@ export function TabBar() {
                 onClick={(e) => handleClose(session.id, e)}
                 className="flex-shrink-0 w-4 h-4 rounded-sm flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-pi-bg-hover text-pi-dim hover:text-pi-text transition-all"
               >
-                <X size={11} />
-              </button>
-            </button>
+                  <X size={11} />
+                </button>
+            </div>
           );
         })}
       </div>

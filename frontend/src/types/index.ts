@@ -7,15 +7,23 @@
 export interface Session {
   id: string;
   title: string;
+  titleSource?: SessionTitleSource;
   projectPath: string;
   projectName: string;
   branch?: string;
+  parentSessionId?: string;
+  forkedFromMessageId?: string;
+  forkedAt?: number;
+  modelProvider?: string;
   modelId: string;
+  thinkingLevel?: ThinkingLevel;
   createdAt: number;
   updatedAt: number;
   status: SessionStatus;
   messageCount: number;
 }
+
+export type SessionTitleSource = 'default' | 'auto' | 'manual';
 
 export type SessionStatus = 'idle' | 'running' | 'error';
 
@@ -81,11 +89,61 @@ export interface PermissionRequest {
   args: Record<string, unknown>;
   message: string;
   risk: 'low' | 'medium' | 'high';
+  preview?: PermissionPreview;
+}
+
+export type PermissionPreview =
+  | {
+      kind: 'bash';
+      command: string;
+      cwd?: string;
+    }
+  | {
+      kind: 'file';
+      path: string;
+      operation: 'edit' | 'write';
+      diff?: string;
+      summary?: string;
+      truncated?: boolean;
+    };
+
+export type PermissionScope = 'session' | 'project' | 'global';
+
+export interface PermissionRule {
+  id: string;
+  toolName: string;
+  scope: PermissionScope;
+  sessionId?: string;
+  projectPath?: string;
+  commandPrefix?: string;
+  pathPattern?: string;
+  riskMax: PermissionRequest['risk'];
+  description: string;
+  createdAt: number;
+  updatedAt: number;
+  useCount: number;
+  lastUsedAt?: number;
+}
+
+export interface PermissionAuditEntry {
+  id: string;
+  timestamp: number;
+  sessionId: string;
+  projectPath?: string;
+  toolName: string;
+  action: PermissionResponse['action'];
+  scope?: PermissionScope;
+  risk: PermissionRequest['risk'];
+  command?: string;
+  path?: string;
+  ruleId?: string;
+  reason?: string;
+  message?: string;
 }
 
 export type PermissionResponse = 
   | { action: 'allow'; requestId: string }
-  | { action: 'always_allow'; requestId: string }
+  | { action: 'always_allow'; requestId: string; scope?: PermissionScope }
   | { action: 'deny'; requestId: string };
 
 export interface TokenUsage {
@@ -94,6 +152,91 @@ export interface TokenUsage {
   cacheRead: number;
   cacheWrite: number;
   cost: number;
+}
+
+export interface RuntimeInfo {
+  mode: 'mock' | 'pi' | 'auto';
+  active: 'mock' | 'pi';
+  fallback: boolean;
+  detail?: string;
+}
+
+export interface AuthProviderStatus {
+  id: string;
+  name: string;
+  configured: boolean;
+  source?: string;
+  label?: string;
+  models: number;
+  availableModels: number;
+}
+
+export interface AuthStatusResult {
+  providers: AuthProviderStatus[];
+}
+
+export interface AuthProviderTestResult {
+  provider: string;
+  name: string;
+  ok: boolean;
+  configured: boolean;
+  source?: string;
+  label?: string;
+  models: number;
+  availableModels: number;
+  modelId?: string;
+  durationMs: number;
+  message: string;
+  error?: string;
+}
+
+export interface SlashCommandInfo {
+  name: string;
+  description: string;
+  category?: string;
+  source?: 'runtime' | 'extension' | 'builtin';
+  insertText?: string;
+}
+
+export interface RecentProject {
+  projectPath: string;
+  realPath: string;
+  projectName: string;
+  branch: string | null;
+  updatedAt: number;
+  sessionCount: number;
+  lastSessionId?: string;
+  isGitRepo: boolean;
+  missing?: boolean;
+}
+
+export interface RepositoryBranchInfo {
+  name: string;
+  current: boolean;
+  local: boolean;
+  remote: boolean;
+  remoteRef?: string;
+  checkedOut: boolean;
+  worktreePath?: string;
+}
+
+export interface RepositoryWorktreeInfo {
+  path: string;
+  branch: string | null;
+  current: boolean;
+}
+
+export interface RepositoryContextResult {
+  state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error';
+  workDir: string;
+  repoRoot: string | null;
+  repoName: string | null;
+  currentBranch: string | null;
+  defaultBranch: string | null;
+  dirty: boolean;
+  branches: RepositoryBranchInfo[];
+  worktrees: RepositoryWorktreeInfo[];
+  error?: string;
 }
 
 // ---- Model & Provider ----
@@ -134,6 +277,125 @@ export interface PiTheme {
     cardBg?: string;
     infoBg?: string;
   };
+}
+
+export type ChannelProvider = 'feishu' | 'wechat';
+
+export interface ChannelConfig {
+  id: string;
+  provider: ChannelProvider;
+  name: string;
+  enabled: boolean;
+  webhookUrl?: string;
+  verificationToken?: string;
+  signingSecret?: string;
+  encryptionKey?: string;
+  appId?: string;
+  appSecret?: string;
+  defaultRecipientId?: string;
+  lastRecipientId?: string;
+  defaultProjectPath?: string;
+  defaultSessionId?: string;
+  autoCreateSession: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastEventAt?: number;
+  lastError?: string;
+  lastTestAt?: number;
+}
+
+export interface ChannelInput {
+  provider?: ChannelProvider;
+  name?: string;
+  enabled?: boolean;
+  webhookUrl?: string;
+  verificationToken?: string;
+  signingSecret?: string;
+  encryptionKey?: string;
+  appId?: string;
+  appSecret?: string;
+  defaultRecipientId?: string;
+  defaultProjectPath?: string;
+  defaultSessionId?: string;
+  autoCreateSession?: boolean;
+}
+
+export interface ChannelTestResult {
+  ok: boolean;
+  message: string;
+  channel?: ChannelConfig;
+}
+
+// ---- Agents ----
+
+export interface AgentConfig {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  enabled: boolean;
+  modelProvider?: string;
+  modelId?: string;
+  projectPath?: string;
+  channelIds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentInput {
+  name?: string;
+  description?: string;
+  systemPrompt?: string;
+  enabled?: boolean;
+  modelProvider?: string;
+  modelId?: string;
+  projectPath?: string;
+  channelIds?: string[];
+}
+
+export interface ServerDiagnostics {
+  ok: boolean;
+  server: {
+    pid: number;
+    host: string;
+    port: number;
+    uptimeSec: number;
+    node: string;
+    platform: string;
+    dataDir: string;
+  };
+  security: {
+    authEnabled: boolean;
+    cors: string;
+    publicEndpoints: string[];
+  };
+  runtime: {
+    mode: string;
+    permissionMode: string;
+  };
+  sdk: {
+    available: boolean;
+    exports?: {
+      AuthStorage: boolean;
+      ModelRegistry: boolean;
+    };
+    error?: string;
+  };
+  counts: {
+    sessions: number;
+    channels: number;
+    agents: number;
+    permissionRules: number;
+    permissionAuditEntries: number;
+    packages: number;
+    extensions: number;
+    themes: number;
+  };
+  providers: Array<{
+    id: string;
+    name: string;
+    models: number;
+  }>;
 }
 
 // ---- Extensions & Packages ----
@@ -205,17 +467,98 @@ export interface GitInfo {
   changes: FileChange[];
 }
 
+// ---- Workspace Browser ----
+
+export type WorkspaceFileStatus =
+  | 'modified'
+  | 'added'
+  | 'deleted'
+  | 'renamed'
+  | 'untracked'
+  | 'copied'
+  | 'type_changed'
+  | 'unknown';
+
+export interface WorkspaceChangedFile {
+  path: string;
+  oldPath?: string;
+  status: WorkspaceFileStatus;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorkspaceStatusResult {
+  state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error';
+  workDir: string;
+  repoName: string | null;
+  branch: string | null;
+  isGitRepo: boolean;
+  changedFiles: WorkspaceChangedFile[];
+  error?: string;
+}
+
+export interface WorkspaceTreeEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+}
+
+export interface WorkspaceTreeResult {
+  state: 'ok' | 'missing' | 'error';
+  path: string;
+  entries: WorkspaceTreeEntry[];
+  error?: string;
+}
+
+export interface WorkspaceReadFileResult {
+  state: 'ok' | 'binary' | 'too_large' | 'missing' | 'error';
+  path: string;
+  previewType?: 'text' | 'image';
+  content?: string;
+  dataUrl?: string;
+  mimeType?: string;
+  language: string;
+  size: number;
+  truncated?: boolean;
+  readBytes?: number;
+  error?: string;
+}
+
+export interface WorkspaceWriteFileResult {
+  state: 'ok' | 'missing' | 'error';
+  path: string;
+  size: number;
+  updatedAt: number;
+  error?: string;
+}
+
+export interface WorkspaceDiffResult {
+  state: 'ok' | 'missing' | 'not_git_repo' | 'error';
+  path: string;
+  diff?: string;
+  error?: string;
+}
+
+export interface WorkspaceSearchResult {
+  state: 'ok' | 'missing' | 'error';
+  query: string;
+  files: WorkspaceTreeEntry[];
+  error?: string;
+}
+
 // ---- WebSocket Protocol ----
 
 export type WsClientMessage =
   | { type: 'prompt'; sessionId: string; message: string; images?: ImageAttachment[] }
-  | { type: 'steer'; sessionId: string; message: string }
-  | { type: 'follow_up'; sessionId: string; message: string }
+  | { type: 'steer'; sessionId: string; message: string; images?: ImageAttachment[] }
+  | { type: 'follow_up'; sessionId: string; message: string; images?: ImageAttachment[] }
   | { type: 'permission_response'; sessionId: string; response: PermissionResponse }
+  | { type: 'set_permission_mode'; mode: PermissionMode }
   | { type: 'stop_generation'; sessionId: string }
-  | { type: 'set_model'; modelId: string; provider: string }
-  | { type: 'set_thinking_level'; level: ThinkingLevel }
-  | { type: 'session_create'; projectPath: string }
+  | { type: 'set_model'; modelId: string; provider: string; sessionId?: string }
+  | { type: 'auth_refresh' }
+  | { type: 'set_thinking_level'; level: ThinkingLevel; sessionId?: string }
+  | { type: 'session_create'; projectPath: string; branch?: string | null; worktree?: boolean }
   | { type: 'session_delete'; sessionId: string }
   | { type: 'session_rename'; sessionId: string; title: string }
   | { type: 'session_tree_navigate'; sessionId: string; targetId: string }
@@ -224,10 +567,26 @@ export type WsClientMessage =
   | { type: 'package_install'; source: string }
   | { type: 'package_remove'; source: string }
   | { type: 'theme_set'; name: string }
+  | { type: 'terminal_start'; sessionId: string; terminalId?: string; cols?: number; rows?: number }
+  | { type: 'terminal_input'; terminalId: string; data: string }
+  | { type: 'terminal_resize'; terminalId: string; cols: number; rows: number }
+  | { type: 'terminal_stop'; terminalId: string }
   | { type: 'ping' };
 
 export type WsServerMessage =
-  | { type: 'connected'; sessions: Session[]; currentModel: ModelInfo; thinkingLevel: ThinkingLevel }
+  | {
+      type: 'connected';
+      sessions: Session[];
+      currentModel: ModelInfo;
+      thinkingLevel: ThinkingLevel;
+      providers?: ProviderInfo[];
+      packages?: PackageInfo[];
+      extensions?: ExtensionInfo[];
+      themes?: PiTheme[];
+      messagesBySession?: Record<string, ChatMessage[]>;
+      runtimeInfo?: RuntimeInfo;
+      slashCommands?: SlashCommandInfo[];
+    }
   | { type: 'status'; sessionId: string; status: SessionStatus; detail?: string }
   | { type: 'text_delta'; sessionId: string; delta: string }
   | { type: 'text_start'; sessionId: string; messageId: string }
@@ -239,21 +598,28 @@ export type WsServerMessage =
   | { type: 'tool_result'; sessionId: string; result: ToolResult }
   | { type: 'permission_request'; sessionId: string; request: PermissionRequest }
   | { type: 'message_complete'; sessionId: string; messageId: string; usage: TokenUsage }
+  | { type: 'message_added'; sessionId: string; message: ChatMessage }
   | { type: 'session_updated'; session: Session }
-  | { type: 'session_created'; session: Session }
+  | { type: 'session_created'; session: Session; messages?: ChatMessage[] }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'queue_update'; sessionId: string; steering: number; followUp: number }
   | { type: 'compaction_start'; sessionId: string }
   | { type: 'compaction_end'; sessionId: string }
   | { type: 'error'; sessionId?: string; message: string; code?: string }
   | { type: 'pong' }
-  | { type: 'model_updated'; model: ModelInfo; thinkingLevel: ThinkingLevel }
+  | { type: 'model_updated'; model: ModelInfo; thinkingLevel: ThinkingLevel; sessionId?: string }
   | { type: 'providers_updated'; providers: ProviderInfo[] }
   | { type: 'themes_updated'; themes: PiTheme[] }
   | { type: 'packages_updated'; packages: PackageInfo[] }
   | { type: 'extensions_updated'; extensions: ExtensionInfo[] }
+  | { type: 'runtime_updated'; runtimeInfo: RuntimeInfo }
+  | { type: 'slash_commands_updated'; commands: SlashCommandInfo[] }
   | { type: 'file_changes'; sessionId: string; changes: FileChange[] }
-  | { type: 'git_info'; sessionId: string; git: GitInfo };
+  | { type: 'git_info'; sessionId: string; git: GitInfo }
+  | { type: 'terminal_started'; sessionId: string; terminalId: string; cwd: string; shell: string; backend: 'pty' | 'pipe' }
+  | { type: 'terminal_output'; terminalId: string; data: string }
+  | { type: 'terminal_exited'; terminalId: string; exitCode: number | null; signal: string | null }
+  | { type: 'terminal_error'; sessionId?: string; terminalId?: string; message: string };
 
 export interface ImageAttachment {
   data: string;
@@ -270,18 +636,22 @@ export interface AutocompleteItem {
   icon?: string;
 }
 
-export type ViewType = 'chat' | 'settings' | 'tasks' | 'packages' | 'themes' | 'extensions';
+export type ViewType = 'chat' | 'settings' | 'tasks' | 'packages' | 'themes' | 'extensions' | 'agents' | 'skills';
 
-export type RightPanelType = 'changes' | 'files' | 'tree' | 'usage' | null;
+export type RightPanelType = 'changes' | 'files' | 'tree' | 'usage' | 'terminal' | null;
 
 export interface AppSettings {
   theme: string;
   language: 'en' | 'zh' | 'ja';
   fontSize: number;
+  fontFamily: string;
+  monoFontFamily: string;
   permissionMode: PermissionMode;
   sidebarWidth: number;
   rightPanelWidth: number;
   rightPanelType: RightPanelType;
   showThinking: boolean;
   compactOnOverflow: boolean;
+  chatBackgroundImage: string;
+  chatBackgroundDim: number;
 }

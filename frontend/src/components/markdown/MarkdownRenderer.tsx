@@ -1,28 +1,152 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { createHighlighter, type Highlighter } from 'shiki';
+import type { HighlighterCore, LanguageInput, ThemeInput } from 'shiki/core';
 
-let highlighterPromise: Promise<Highlighter> | null = null;
+type LanguageId =
+  | 'typescript'
+  | 'javascript'
+  | 'tsx'
+  | 'jsx'
+  | 'json'
+  | 'jsonc'
+  | 'python'
+  | 'rust'
+  | 'go'
+  | 'java'
+  | 'c'
+  | 'csharp'
+  | 'html'
+  | 'css'
+  | 'yaml'
+  | 'xml'
+  | 'markdown'
+  | 'sql'
+  | 'bash'
+  | 'shellscript'
+  | 'vue'
+  | 'svelte'
+  | 'astro'
+  | 'php'
+  | 'swift'
+  | 'kotlin'
+  | 'scala'
+  | 'docker'
+  | 'toml'
+  | 'ini'
+  | 'diff'
+  | 'graphql'
+  | 'lua'
+  | 'perl'
+  | 'r'
+  | 'dart';
 
-function getHighlighter(): Promise<Highlighter> {
+type LanguageModule = { default: LanguageInput };
+type LanguageLoader = () => Promise<LanguageModule>;
+
+const languageLoaders: Record<LanguageId, LanguageLoader> = {
+  typescript: () => import('shiki/langs/typescript.mjs') as Promise<LanguageModule>,
+  javascript: () => import('shiki/langs/javascript.mjs') as Promise<LanguageModule>,
+  tsx: () => import('shiki/langs/tsx.mjs') as Promise<LanguageModule>,
+  jsx: () => import('shiki/langs/jsx.mjs') as Promise<LanguageModule>,
+  json: () => import('shiki/langs/json.mjs') as Promise<LanguageModule>,
+  jsonc: () => import('shiki/langs/jsonc.mjs') as Promise<LanguageModule>,
+  python: () => import('shiki/langs/python.mjs') as Promise<LanguageModule>,
+  rust: () => import('shiki/langs/rust.mjs') as Promise<LanguageModule>,
+  go: () => import('shiki/langs/go.mjs') as Promise<LanguageModule>,
+  java: () => import('shiki/langs/java.mjs') as Promise<LanguageModule>,
+  c: () => import('shiki/langs/c.mjs') as Promise<LanguageModule>,
+  csharp: () => import('shiki/langs/csharp.mjs') as Promise<LanguageModule>,
+  html: () => import('shiki/langs/html.mjs') as Promise<LanguageModule>,
+  css: () => import('shiki/langs/css.mjs') as Promise<LanguageModule>,
+  yaml: () => import('shiki/langs/yaml.mjs') as Promise<LanguageModule>,
+  xml: () => import('shiki/langs/xml.mjs') as Promise<LanguageModule>,
+  markdown: () => import('shiki/langs/markdown.mjs') as Promise<LanguageModule>,
+  sql: () => import('shiki/langs/sql.mjs') as Promise<LanguageModule>,
+  bash: () => import('shiki/langs/bash.mjs') as Promise<LanguageModule>,
+  shellscript: () => import('shiki/langs/shellscript.mjs') as Promise<LanguageModule>,
+  vue: () => import('shiki/langs/vue.mjs') as Promise<LanguageModule>,
+  svelte: () => import('shiki/langs/svelte.mjs') as Promise<LanguageModule>,
+  astro: () => import('shiki/langs/astro.mjs') as Promise<LanguageModule>,
+  php: () => import('shiki/langs/php.mjs') as Promise<LanguageModule>,
+  swift: () => import('shiki/langs/swift.mjs') as Promise<LanguageModule>,
+  kotlin: () => import('shiki/langs/kotlin.mjs') as Promise<LanguageModule>,
+  scala: () => import('shiki/langs/scala.mjs') as Promise<LanguageModule>,
+  docker: () => import('shiki/langs/docker.mjs') as Promise<LanguageModule>,
+  toml: () => import('shiki/langs/toml.mjs') as Promise<LanguageModule>,
+  ini: () => import('shiki/langs/ini.mjs') as Promise<LanguageModule>,
+  diff: () => import('shiki/langs/diff.mjs') as Promise<LanguageModule>,
+  graphql: () => import('shiki/langs/graphql.mjs') as Promise<LanguageModule>,
+  lua: () => import('shiki/langs/lua.mjs') as Promise<LanguageModule>,
+  perl: () => import('shiki/langs/perl.mjs') as Promise<LanguageModule>,
+  r: () => import('shiki/langs/r.mjs') as Promise<LanguageModule>,
+  dart: () => import('shiki/langs/dart.mjs') as Promise<LanguageModule>,
+};
+
+const languageAliases: Record<string, LanguageId> = {
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  ts: 'typescript',
+  py: 'python',
+  rs: 'rust',
+  golang: 'go',
+  cs: 'csharp',
+  shell: 'bash',
+  sh: 'bash',
+  zsh: 'bash',
+  powershell: 'shellscript',
+  ps1: 'shellscript',
+  yml: 'yaml',
+  md: 'markdown',
+  dockerfile: 'docker',
+  gql: 'graphql',
+};
+
+let highlighterPromise: Promise<HighlighterCore> | null = null;
+const loadedLanguages = new Set<LanguageId>();
+
+function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
-    highlighterPromise = createHighlighter({
-      themes: ['dark-plus'],
-      langs: [
-        'typescript', 'javascript', 'python', 'rust', 'go', 'java',
-        'c', 'cpp', 'csharp', 'html', 'css', 'json', 'yaml', 'xml',
-        'markdown', 'sql', 'bash', 'shell', 'sh', 'zsh',
-        'jsx', 'tsx', 'vue', 'svelte', 'astro',
-        'ruby', 'php', 'swift', 'kotlin', 'scala',
-        'dockerfile', 'toml', 'ini', 'diff', 'graphql',
-        'lua', 'perl', 'r', 'dart',
-      ],
-    });
+    highlighterPromise = Promise.all([
+      import('shiki/core'),
+      import('shiki/engine/javascript'),
+      import('shiki/themes/dark-plus.mjs') as Promise<{ default: ThemeInput }>,
+    ]).then(([core, engine, darkPlus]) => core.createHighlighterCore({
+      themes: [darkPlus.default],
+      langs: [],
+      langAlias: languageAliases,
+      engine: engine.createJavaScriptRegexEngine(),
+      warnings: false,
+    }));
   }
   return highlighterPromise;
 }
 
+async function ensureLanguage(highlighter: HighlighterCore, lang: LanguageId): Promise<boolean> {
+  if (loadedLanguages.has(lang)) return true;
+
+  try {
+    const module = await languageLoaders[lang]();
+    await highlighter.loadLanguage(module.default);
+    loadedLanguages.add(lang);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLanguage(lang: string): LanguageId | null {
+  const token = lang
+    .trim()
+    .toLowerCase()
+    .replace(/^language-/, '')
+    .split(/[\s,{:]/, 1)[0];
+
+  if (!token) return null;
+  if (token in languageLoaders) return token as LanguageId;
+  return languageAliases[token] ?? null;
+}
 // Configure marked with custom code renderer
 const renderer = new marked.Renderer();
 renderer.code = function ({ text, lang }: { text: string; lang?: string }): string {
@@ -42,10 +166,16 @@ const codeBlocks = new Map<string, { text: string; lang: string }>();
 
 interface MarkdownRendererProps {
   content: string;
+  onRendered?: () => void;
 }
 
-export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, onRendered }: MarkdownRendererProps) {
   const [html, setHtml] = useState('');
+  const onRenderedRef = useRef(onRendered);
+
+  useEffect(() => {
+    onRenderedRef.current = onRendered;
+  }, [onRendered]);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,9 +194,10 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
         
         for (const [id, { text: codeText, lang }] of codeBlocks) {
           let highlighted: string;
-          if (lang && highlighter.getLoadedLanguages().includes(lang)) {
+          const normalizedLang = normalizeLanguage(lang);
+          if (normalizedLang && await ensureLanguage(highlighter, normalizedLang)) {
             try {
-              highlighted = highlighter.codeToHtml(codeText, { lang, theme: 'dark-plus' });
+              highlighted = highlighter.codeToHtml(codeText, { lang: normalizedLang, theme: 'dark-plus' });
             } catch {
               highlighted = `<pre><code>${escapeHtml(codeText)}</code></pre>`;
             }
@@ -85,12 +216,14 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
             ADD_ATTR: ['target'],
           });
           setHtml(clean);
+          window.requestAnimationFrame(() => onRenderedRef.current?.());
         }
       } catch {
         if (!cancelled) {
           // Fallback: plain text with escaping
           const clean = DOMPurify.sanitize(escapeHtml(content), { ALLOWED_TAGS: [] });
           setHtml(`<pre>${clean}</pre>`);
+          window.requestAnimationFrame(() => onRenderedRef.current?.());
         }
       }
     }
