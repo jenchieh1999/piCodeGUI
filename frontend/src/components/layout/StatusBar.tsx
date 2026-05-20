@@ -1,20 +1,16 @@
 import { useModelStore } from '../../stores/modelStore';
-import { useSettingsStore } from '../../stores/settingsStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useConnectionStore } from '../../stores/connectionStore';
+import { useUIStore } from '../../stores/uiStore';
 import { piApi } from '../../api/client';
 import { cn } from '../shared/utils';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
 import type { ModelInfo, Session, ThinkingLevel } from '../../types';
 import {
-  CheckCircle2,
   Circle,
-  ClipboardList,
   Cpu,
   GitBranch,
   MonitorCog,
-  ShieldAlert,
-  ShieldQuestion,
   Zap,
 } from 'lucide-react';
 
@@ -23,10 +19,10 @@ export function StatusBar() {
   const globalCurrentModel = useModelStore((s) => s.currentModel);
   const availableModels = useModelStore((s) => s.availableModels);
   const globalThinkingLevel = useModelStore((s) => s.thinkingLevel);
-  const permissionMode = useSettingsStore((s) => s.permissionMode);
-  const updateSetting = useSettingsStore((s) => s.updateSetting);
+  const addToast = useUIStore((s) => s.addToast);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sessions = useChatStore((s) => s.sessions);
+  const updateSession = useChatStore((s) => s.updateSession);
   const isConnected = useConnectionStore((s) => s.isConnected);
   const reconnectAttempts = useConnectionStore((s) => s.reconnectAttempts);
   const runtimeInfo = useConnectionStore((s) => s.runtimeInfo);
@@ -45,27 +41,7 @@ export function StatusBar() {
     xhigh: 'text-pi-thinking-xhigh',
   };
 
-  const permissionMeta = {
-    ask: { label: t('status.permission.ask'), Icon: ShieldQuestion },
-    acceptEdits: { label: t('status.permission.acceptEdits'), Icon: CheckCircle2 },
-    plan: { label: t('status.permission.plan'), Icon: ClipboardList },
-    bypassPermissions: { label: t('status.permission.bypassPermissions'), Icon: ShieldAlert },
-  };
-  const PermissionIcon = permissionMeta[permissionMode].Icon;
   const thinkingLabel = thinkingLevelLabel(thinkingLevel, t);
-
-  const nextPermissionMode = () => {
-    const modes: Array<'ask' | 'acceptEdits' | 'plan' | 'bypassPermissions'> = [
-      'ask',
-      'acceptEdits',
-      'plan',
-      'bypassPermissions',
-    ];
-    const idx = modes.indexOf(permissionMode);
-    const next = modes[(idx + 1) % modes.length];
-    updateSetting('permissionMode', next);
-    piApi.send({ type: 'set_permission_mode', mode: next });
-  };
 
   const nextThinkingLevel = () => {
     const levels: Array<'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'> = [
@@ -78,7 +54,16 @@ export function StatusBar() {
     ];
     const idx = levels.indexOf(thinkingLevel);
     const next = levels[(idx + 1) % levels.length];
-    piApi.send({ type: 'set_thinking_level', sessionId: activeSessionId ?? undefined, level: next });
+    const sent = piApi.send({ type: 'set_thinking_level', sessionId: activeSessionId ?? undefined, level: next });
+    if (!sent) {
+      addToast({ type: 'error', message: t('chat.switchThinkingDisconnected') });
+      return;
+    }
+    if (activeSession) {
+      updateSession({ ...activeSession, thinkingLevel: next, updatedAt: Date.now() });
+    } else {
+      useModelStore.getState().setThinkingLevel(next);
+    }
   };
 
   return (
@@ -144,15 +129,6 @@ export function StatusBar() {
             <span>{runtimeInfo.fallback ? t('status.mockFallback') : runtimeInfo.active === 'pi' ? t('status.piSdk') : t('status.mock')}</span>
           </div>
         )}
-
-        <button
-          onClick={nextPermissionMode}
-          className="flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 transition-colors hover:bg-pi-bg-hover/70 hover:text-pi-text"
-          title={t('status.permissionCycle', { mode: permissionMeta[permissionMode].label })}
-        >
-          <PermissionIcon size={12} />
-          <span>{permissionMeta[permissionMode].label}</span>
-        </button>
 
         <div className={cn(
           'flex items-center gap-1 rounded-full px-2 py-0.5',

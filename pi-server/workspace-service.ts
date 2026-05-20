@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getSession } from './mock-agent.js';
 
@@ -28,6 +28,15 @@ export interface WorkspaceStatusResult {
   branch: string | null;
   isGitRepo: boolean;
   changedFiles: WorkspaceChangedFile[];
+  error?: string;
+}
+
+export interface WorkspaceChangeOperationResult {
+  state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error';
+  action: 'accept' | 'discard';
+  path: string;
+  status?: WorkspaceFileStatus;
+  statusResult?: WorkspaceStatusResult;
   error?: string;
 }
 
@@ -63,6 +72,19 @@ export interface WorkspaceWriteFileResult {
   path: string;
   size: number;
   updatedAt: number;
+  error?: string;
+}
+
+export interface WorkspaceDeleteFileResult {
+  state: 'ok' | 'missing' | 'error';
+  path: string;
+  error?: string;
+}
+
+export interface WorkspaceMoveFileResult {
+  state: 'ok' | 'missing' | 'conflict' | 'error';
+  sourcePath: string;
+  targetPath: string;
   error?: string;
 }
 
@@ -102,7 +124,7 @@ const SKIPPED_DIRS = new Set([
 
 export async function handleWorkspaceRequest(rawUrl: string, method: string, req?: NodeJS.ReadableStream): Promise<WorkspaceHttpResponse | null> {
   const url = new URL(rawUrl, 'http://127.0.0.1');
-  const match = /^\/api\/sessions\/([^/]+)\/workspace\/(status|tree|file|diff|search)$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([^/]+)\/workspace\/(status|tree|file|diff|search|change|move)$/.exec(url.pathname);
   if (!match) return null;
 
   const sessionId = decodeURIComponent(match[1]!);
@@ -124,6 +146,45 @@ export async function handleWorkspaceRequest(rawUrl: string, method: string, req
         });
       }
       return json(200, writeWorkspaceFile(sessionId, targetPath, content));
+    }
+
+    if (method === 'DELETE' && resource === 'file') {
+      const body = await readJsonBody(req);
+      const targetPath = typeof body?.path === 'string' ? body.path : workspacePath;
+      return json(200, deleteWorkspacePath(sessionId, targetPath));
+    }
+
+    if (method === 'POST' && resource === 'move') {
+      const body = await readJsonBody(req);
+      const sourcePath = typeof body?.sourcePath === 'string' ? body.sourcePath : '';
+      const targetDirectory = typeof body?.targetDirectory === 'string' ? body.targetDirectory : '';
+      if (!sourcePath) {
+        return json(400, {
+          state: 'error',
+          sourcePath: normalizeWorkspacePath(sourcePath),
+          targetPath: '',
+          error: 'Expected JSON body with a sourcePath field.',
+        });
+      }
+      return json(200, moveWorkspacePath(sessionId, sourcePath, targetDirectory));
+    }
+
+    if (method === 'POST' && resource === 'change') {
+      const body = await readJsonBody(req);
+      const action = body?.action === 'accept' || body?.action === 'discard' ? body.action : null;
+      const targetPath = typeof body?.path === 'string' ? body.path : '';
+      const oldPath = typeof body?.oldPath === 'string' ? body.oldPath : undefined;
+      const status = isWorkspaceFileStatus(body?.status) ? body.status : undefined;
+      if (!action || !targetPath) {
+        return json(400, {
+          state: 'error',
+          action: action ?? 'discard',
+          path: normalizeWorkspacePath(targetPath),
+          status,
+          error: 'Expected JSON body with action and path.',
+        });
+      }
+      return json(200, applyWorkspaceChange(sessionId, { action, path: targetPath, oldPath, status }));
     }
 
     if (method !== 'GET') return null;
@@ -188,6 +249,61 @@ export function getWorkspaceStatus(sessionId: string): WorkspaceStatusResult {
       branch: null,
       isGitRepo: false,
       changedFiles: [],
+    };
+  }
+}
+
+export function applyWorkspaceChange(
+  sessionId: string,
+  input: { action: 'accept' | 'discard'; path: string; oldPath?: string; status?: WorkspaceFileStatus }
+): WorkspaceChangeOperationResult {
+  const normalized = normalizeWorkspacePath(input.path);
+  const oldPath = input.oldPath ? normalizeWorkspacePath(input.oldPath) : undefined;
+  const workspace = resolveWorkspace(sessionId);
+
+  if (!workspace.ok) {
+    return {
+      state: 'missing_workdir',
+      action: input.action,
+      path: normalized,
+      status: input.status,
+      error: workspace.error,
+    };
+  }
+
+  try {
+    git(workspace.workDir, ['rev-parse', '--show-toplevel']);
+  } catch {
+    return {
+      state: 'not_git_repo',
+      action: input.action,
+      path: normalized,
+      status: input.status,
+      error: 'Current workspace is not a Git repository.',
+    };
+  }
+
+  try {
+    if (input.action === 'accept') {
+      acceptWorkspaceChange(workspace.workDir, normalized, oldPath);
+    } else {
+      discardWorkspaceChange(workspace.workDir, normalized, oldPath, input.status);
+    }
+
+    return {
+      state: 'ok',
+      action: input.action,
+      path: normalized,
+      status: input.status,
+      statusResult: getWorkspaceStatus(sessionId),
+    };
+  } catch (err) {
+    return {
+      state: 'error',
+      action: input.action,
+      path: normalized,
+      status: input.status,
+      error: err instanceof Error ? err.message : String(err),
     };
   }
 }
@@ -327,6 +443,74 @@ export function writeWorkspaceFile(sessionId: string, workspacePath: string, con
   }
 }
 
+export function deleteWorkspacePath(sessionId: string, workspacePath: string): WorkspaceDeleteFileResult {
+  const workspace = resolveWorkspace(sessionId);
+  const normalized = normalizeWorkspacePath(workspacePath);
+  if (!workspace.ok) {
+    return { state: 'missing', path: normalized, error: workspace.error };
+  }
+
+  try {
+    assertWorkspaceFilePath(normalized);
+    const absolute = resolveInsideWorkspace(workspace.workDir, normalized);
+    if (!existsSync(absolute)) {
+      return { state: 'missing', path: normalized, error: `Path does not exist: ${normalized}` };
+    }
+    rmSync(absolute, { recursive: true, force: true });
+    return { state: 'ok', path: normalized };
+  } catch (err) {
+    return {
+      state: 'error',
+      path: normalized,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export function moveWorkspacePath(sessionId: string, sourcePath: string, targetDirectory: string): WorkspaceMoveFileResult {
+  const workspace = resolveWorkspace(sessionId);
+  const normalizedSource = normalizeWorkspacePath(sourcePath);
+  const normalizedTargetDirectory = normalizeWorkspacePath(targetDirectory);
+  const targetPath = joinWorkspacePath(normalizedTargetDirectory, path.posix.basename(normalizedSource));
+
+  if (!workspace.ok) {
+    return { state: 'missing', sourcePath: normalizedSource, targetPath, error: workspace.error };
+  }
+
+  try {
+    assertWorkspaceFilePath(normalizedSource);
+    const sourceAbsolute = resolveInsideWorkspace(workspace.workDir, normalizedSource);
+    const targetDirectoryAbsolute = resolveInsideWorkspace(workspace.workDir, normalizedTargetDirectory);
+    const targetAbsolute = resolveInsideWorkspace(workspace.workDir, targetPath);
+
+    if (!existsSync(sourceAbsolute)) {
+      return { state: 'missing', sourcePath: normalizedSource, targetPath, error: `Source path does not exist: ${normalizedSource}` };
+    }
+    if (!existsSync(targetDirectoryAbsolute) || !statSync(targetDirectoryAbsolute).isDirectory()) {
+      return { state: 'missing', sourcePath: normalizedSource, targetPath, error: `Target folder does not exist: ${normalizedTargetDirectory || '.'}` };
+    }
+    if (sourceAbsolute === targetAbsolute) {
+      return { state: 'ok', sourcePath: normalizedSource, targetPath: normalizedSource };
+    }
+    if (isPathInside(targetAbsolute, sourceAbsolute)) {
+      return { state: 'error', sourcePath: normalizedSource, targetPath, error: 'Cannot move a folder into itself.' };
+    }
+    if (existsSync(targetAbsolute)) {
+      return { state: 'conflict', sourcePath: normalizedSource, targetPath, error: `Target already exists: ${targetPath}` };
+    }
+
+    renameSync(sourceAbsolute, targetAbsolute);
+    return { state: 'ok', sourcePath: normalizedSource, targetPath };
+  } catch (err) {
+    return {
+      state: 'error',
+      sourcePath: normalizedSource,
+      targetPath,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export function getWorkspaceDiff(sessionId: string, workspacePath: string): WorkspaceDiffResult {
   const workspace = resolveWorkspace(sessionId);
   const normalized = normalizeWorkspacePath(workspacePath);
@@ -370,10 +554,11 @@ export function searchWorkspaceFiles(sessionId: string, query: string): Workspac
   }
 
   try {
-    const files: WorkspaceTreeEntry[] = [];
+    const matches: Array<{ entry: WorkspaceTreeEntry; score: number }> = [];
     const stack = [''];
+    const matchLimit = SEARCH_LIMIT * 5;
 
-    while (stack.length > 0 && files.length < SEARCH_LIMIT) {
+    while (stack.length > 0 && matches.length < matchLimit) {
       const current = stack.pop()!;
       const absolute = resolveInsideWorkspace(workspace.workDir, current);
       if (!existsSync(absolute) || !statSync(absolute).isDirectory()) continue;
@@ -383,12 +568,23 @@ export function searchWorkspaceFiles(sessionId: string, query: string): Workspac
         const relative = joinWorkspacePath(current, entry.name);
         if (entry.isDirectory()) {
           stack.push(relative);
-        } else if (!normalizedQuery || relative.toLowerCase().includes(normalizedQuery)) {
-          files.push({ name: entry.name, path: relative, isDirectory: false });
-          if (files.length >= SEARCH_LIMIT) break;
+        } else {
+          const score = scoreWorkspaceSearchResult(relative, normalizedQuery);
+          if (score !== null) {
+            matches.push({
+              entry: { name: entry.name, path: relative, isDirectory: false },
+              score,
+            });
+            if (matches.length >= matchLimit) break;
+          }
         }
       }
     }
+
+    const files = matches
+      .sort((a, b) => a.score - b.score || a.entry.path.localeCompare(b.entry.path))
+      .slice(0, SEARCH_LIMIT)
+      .map((match) => match.entry);
 
     return { state: 'ok', query, files };
   } catch (err) {
@@ -398,6 +594,67 @@ export function searchWorkspaceFiles(sessionId: string, query: string): Workspac
       files: [],
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+function scoreWorkspaceSearchResult(filePath: string, query: string): number | null {
+  if (!query) return filePath.split('/').length * 10 + filePath.length / 1000;
+
+  const lowerPath = filePath.toLowerCase();
+  const lowerName = path.basename(lowerPath);
+  const basenameIndex = lowerName.indexOf(query);
+  if (basenameIndex >= 0) {
+    return basenameIndex + 20 + lowerName.length / 1000;
+  }
+
+  const pathIndex = lowerPath.indexOf(query);
+  if (pathIndex >= 0) {
+    return pathIndex + 80 + lowerPath.length / 1000;
+  }
+
+  let cursor = 0;
+  let score = 140;
+  for (const char of query) {
+    const next = lowerPath.indexOf(char, cursor);
+    if (next < 0) return null;
+    score += next - cursor;
+    cursor = next + 1;
+  }
+  return score + lowerPath.length / 1000;
+}
+
+function acceptWorkspaceChange(workDir: string, workspacePath: string, oldPath?: string): void {
+  assertWorkspaceFilePath(workspacePath);
+  resolveInsideWorkspace(workDir, workspacePath);
+  const paths = uniqueWorkspacePaths([oldPath, workspacePath]);
+  for (const filePath of paths) {
+    resolveInsideWorkspace(workDir, filePath);
+  }
+  git(workDir, ['add', '--', ...paths]);
+}
+
+function discardWorkspaceChange(workDir: string, workspacePath: string, oldPath?: string, status?: WorkspaceFileStatus): void {
+  assertWorkspaceFilePath(workspacePath);
+  const paths = uniqueWorkspacePaths([oldPath, workspacePath]);
+  for (const filePath of paths) {
+    resolveInsideWorkspace(workDir, filePath);
+  }
+
+  if (status === 'untracked') {
+    removeWorkspacePath(workDir, workspacePath);
+    return;
+  }
+
+  const pathsInHead = paths.filter((filePath) => pathExistsInHead(workDir, filePath));
+  const pathsNotInHead = paths.filter((filePath) => !pathsInHead.includes(filePath));
+
+  if (pathsInHead.length > 0) {
+    git(workDir, ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...pathsInHead]);
+  }
+
+  for (const filePath of pathsNotInHead) {
+    git(workDir, ['rm', '-f', '--cached', '--', filePath], true);
+    removeWorkspacePath(workDir, filePath);
   }
 }
 
@@ -428,6 +685,37 @@ function readChangedFiles(workDir: string): WorkspaceChangedFile[] {
   }
 
   return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function pathExistsInHead(workDir: string, workspacePath: string): boolean {
+  return git(workDir, ['ls-tree', '--name-only', 'HEAD', '--', workspacePath], true).trim().length > 0;
+}
+
+function uniqueWorkspacePaths(paths: Array<string | undefined>): string[] {
+  const normalized = paths
+    .filter((value): value is string => Boolean(value))
+    .map((value) => normalizeWorkspacePath(value))
+    .filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+
+function assertWorkspaceFilePath(workspacePath: string): void {
+  if (!normalizeWorkspacePath(workspacePath)) {
+    throw new Error('Expected a file path inside the current workspace.');
+  }
+}
+
+function removeWorkspacePath(root: string, workspacePath: string): void {
+  assertWorkspaceFilePath(workspacePath);
+  const absolute = resolveInsideWorkspace(root, workspacePath);
+  if (existsSync(absolute)) {
+    rmSync(absolute, { recursive: true, force: true });
+  }
+}
+
+function isPathInside(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 function readNumstat(workDir: string): Map<string, { additions: number; deletions: number }> {
@@ -468,6 +756,19 @@ function mapGitStatus(code: string): WorkspaceFileStatus {
   if (code.includes('T')) return 'type_changed';
   if (code.includes('M')) return 'modified';
   return 'unknown';
+}
+
+function isWorkspaceFileStatus(value: unknown): value is WorkspaceFileStatus {
+  return (
+    value === 'modified' ||
+    value === 'added' ||
+    value === 'deleted' ||
+    value === 'renamed' ||
+    value === 'untracked' ||
+    value === 'copied' ||
+    value === 'type_changed' ||
+    value === 'unknown'
+  );
 }
 
 function resolveWorkspace(sessionId: string): { ok: true; workDir: string } | { ok: false; workDir: string; error: string } {

@@ -19,14 +19,14 @@ import type {
 import {
   createSession, getAllSessions, deleteSession, renameSession, getSession,
   getCurrentModel, getProviders, getThinkingLevel, setThinkingLevel, setModel,
-  getPackages, installPackage, removePackage, getExtensions, getThemes,
+  getPackages, getExtensions, getThemes,
   forkSession, setSessionStatus, setSessionModel, getSessionModel, setSessionThinkingLevel, getSessionThinkingLevel,
   maybeAutoTitleSession, autoTitleDefaultSessions,
 } from './mock-agent.js';
 import { PermissionBroker } from './permission-broker.js';
 import { handleAuthRequest } from './auth-service.js';
 import { handlePermissionRequest } from './permission-service.js';
-import { getDataDir, loadMessagesBySession } from './persistence.js';
+import { deleteMessages, getDataDir, loadMessagesBySession } from './persistence.js';
 import { createAgentRuntime } from './runtime-factory.js';
 import { TranscriptRecorder } from './transcript-recorder.js';
 import { handleWorkspaceRequest } from './workspace-service.js';
@@ -35,8 +35,11 @@ import { findModelInProviders, firstModelInProviders, getAvailableSdkProviders }
 import { getSlashCommands } from './slash-commands.js';
 import { createChannelService } from './channel-service.js';
 import { handleAgentRequest, listAgents } from './agent-service.js';
+import { captureRuntimeFailureLearning, maybeCaptureUserLearning, prepareAgentOrchestrationPrompt } from './agent-orchestration-service.js';
 import { loadPermissionAudit, loadPermissionRules } from './permission-store.js';
 import { TerminalService } from './terminal-service.js';
+import { extensionService, handleExtensionRequest } from './extension-service.js';
+import type { ExtensionResourceSnapshotData, ThemeData } from './types.js';
 
 const PORT = parseInt(process.env.PORT ?? '1421', 10);
 const HOST = process.env.HOST ?? '127.0.0.1';
@@ -52,7 +55,11 @@ const broadcastToClients = (message: WsServerMsg) => {
     }
   }
 };
+extensionService.onProgress((progress) => {
+  broadcastToClients({ type: 'package_progress', progress });
+});
 const channelService = createChannelService({ broadcast: broadcastToClients });
+const terminalService = new TerminalService(broadcastToClients);
 
 // Create HTTP server
 const httpServer = createServer(async (req, res) => {
@@ -114,6 +121,15 @@ const httpServer = createServer(async (req, res) => {
       ...securityHeaders(req),
     });
     res.end(agentResponse.body !== undefined ? JSON.stringify(agentResponse.body) : '');
+    return;
+  }
+
+  const extensionResponse = await handleExtensionRequest(req).catch((err) => ({
+    status: 500,
+    body: { error: err instanceof Error ? err.message : String(err) },
+  }));
+  if (extensionResponse) {
+    writeJson(res, req, extensionResponse.status, extensionResponse.body);
     return;
   }
 
@@ -186,18 +202,24 @@ wss.on('connection', async (ws: WebSocket) => {
   // Send initial connection data
   autoTitleDefaultSessions();
   const sessions = getAllSessions();
+  const initialResources = await safeResourceSnapshot(sessions[0]?.projectPath);
   const connectedMsg: WsServerMsg = {
     type: 'connected',
     sessions,
     currentModel: selectedModel,
     thinkingLevel: getThinkingLevel(),
     providers: providerCatalog,
-    packages: getPackages(),
-    extensions: getExtensions(),
-    themes: getThemes(),
+    packages: initialResources?.packages ?? getPackages(),
+    extensions: initialResources?.extensions ?? getExtensions(),
+    skills: initialResources?.skills ?? [],
+    prompts: initialResources?.prompts ?? [],
+    themes: mergeThemes(getThemes(), initialResources?.themes ?? []),
+    resourceDiagnostics: initialResources?.diagnostics ?? [],
+    marketplace: initialResources?.marketplace ?? [],
+    trust: initialResources?.trust ?? [],
     messagesBySession: loadMessagesBySession(sessions),
     runtimeInfo: runtime.getInfo(),
-    slashCommands: getSlashCommands(getPackages()),
+    slashCommands: initialResources?.slashCommands ?? getSlashCommands(getPackages()),
   };
   ws.send(JSON.stringify(connectedMsg));
 
@@ -211,7 +233,8 @@ wss.on('connection', async (ws: WebSocket) => {
     transcriptRecorder.recordServerMessage(message);
     ws.send(JSON.stringify(message));
   };
-  const terminalService = new TerminalService(sendToClient);
+
+  const getActiveProjectPath = () => getAllSessions()[0]?.projectPath ?? process.cwd();
 
   // Handle messages
   ws.on('message', async (raw) => {
@@ -271,6 +294,29 @@ wss.on('connection', async (ws: WebSocket) => {
         break;
       }
 
+      case 'session_clear': {
+        const session = getSession(msg.sessionId);
+        if (!session) {
+          sendError(ws, 'Session not found', msg.sessionId);
+          break;
+        }
+
+        const ctrl = activeResponses.get(msg.sessionId);
+        if (ctrl) {
+          ctrl.abort();
+          activeResponses.delete(msg.sessionId);
+        }
+        await Promise.resolve(runtime.abort(msg.sessionId)).catch(() => undefined);
+        await runtime.dispose(msg.sessionId);
+        permissionBroker.abortSession(msg.sessionId);
+        transcriptRecorder.clearSession(msg.sessionId);
+        deleteMessages(msg.sessionId);
+        setSessionStatus(msg.sessionId, 'idle');
+        ws.send(JSON.stringify({ type: 'session_cleared', sessionId: msg.sessionId } satisfies WsServerMsg));
+        ws.send(JSON.stringify({ type: 'status', sessionId: msg.sessionId, status: 'idle' } satisfies WsServerMsg));
+        break;
+      }
+
       case 'session_rename': {
         const session = renameSession(msg.sessionId, msg.title);
         if (session) {
@@ -323,17 +369,20 @@ wss.on('connection', async (ws: WebSocket) => {
 
         const abortController = new AbortController();
         activeResponses.set(msg.sessionId, abortController);
-        const imageNote = msg.images?.length
-          ? `${msg.message ? '\n\n' : ''}[${msg.images.length} image attachment${msg.images.length > 1 ? 's' : ''}]`
-          : '';
-        transcriptRecorder.recordUserPrompt(msg.sessionId, `${msg.message}${imageNote}`);
+        transcriptRecorder.recordUserPrompt(msg.sessionId, msg.message, msg.images);
+        maybeCaptureUserLearning(session, msg.message, listAgents());
         sendAutoTitleUpdate(msg.sessionId, sendToClient);
 
         try {
           await applySessionRuntimeConfig(runtime, session, providerCatalog, selectedModel);
+          const orchestration = prepareAgentOrchestrationPrompt({
+            session,
+            message: msg.message,
+            agents: listAgents(),
+          });
           await runtime.prompt({
             sessionId: msg.sessionId,
-            message: msg.message,
+            message: orchestration.message,
             images: msg.images,
           }, {
             sendMessage: (m) => {
@@ -351,6 +400,7 @@ wss.on('connection', async (ws: WebSocket) => {
           }, abortController.signal);
         } catch (err: any) {
           if (err.name !== 'AbortError') {
+            captureRuntimeFailureLearning(session, err);
             setSessionStatus(msg.sessionId, 'error');
             sendToClient({ type: 'status', sessionId: msg.sessionId, status: 'error', detail: err.message } satisfies WsServerMsg);
             sendError(ws, err.message, msg.sessionId);
@@ -375,13 +425,18 @@ wss.on('connection', async (ws: WebSocket) => {
           if (session) {
             await applySessionRuntimeConfig(runtime, session, providerCatalog, selectedModel);
           }
-          const imageNote = msg.images?.length
-            ? `${msg.message ? '\n\n' : ''}[${msg.images.length} image attachment${msg.images.length > 1 ? 's' : ''}]`
-            : '';
-          transcriptRecorder.recordUserPrompt(msg.sessionId, `${msg.message}${imageNote}`);
+          transcriptRecorder.recordUserPrompt(msg.sessionId, msg.message, msg.images);
+          if (session) {
+            maybeCaptureUserLearning(session, msg.message, listAgents());
+          }
           sendAutoTitleUpdate(msg.sessionId, sendToClient);
-          await runtime.steer?.(msg.sessionId, msg.message, msg.images);
+          const orchestration = session
+            ? prepareAgentOrchestrationPrompt({ session, message: msg.message, agents: listAgents() })
+            : { message: msg.message };
+          await runtime.steer?.(msg.sessionId, orchestration.message, msg.images);
         } catch (err: any) {
+          const session = getSession(msg.sessionId);
+          if (session) captureRuntimeFailureLearning(session, err);
           sendError(ws, err.message, msg.sessionId);
         }
         break;
@@ -393,13 +448,18 @@ wss.on('connection', async (ws: WebSocket) => {
           if (session) {
             await applySessionRuntimeConfig(runtime, session, providerCatalog, selectedModel);
           }
-          const imageNote = msg.images?.length
-            ? `${msg.message ? '\n\n' : ''}[${msg.images.length} image attachment${msg.images.length > 1 ? 's' : ''}]`
-            : '';
-          transcriptRecorder.recordUserPrompt(msg.sessionId, `${msg.message}${imageNote}`);
+          transcriptRecorder.recordUserPrompt(msg.sessionId, msg.message, msg.images);
+          if (session) {
+            maybeCaptureUserLearning(session, msg.message, listAgents());
+          }
           sendAutoTitleUpdate(msg.sessionId, sendToClient);
-          await runtime.followUp?.(msg.sessionId, msg.message, msg.images);
+          const orchestration = session
+            ? prepareAgentOrchestrationPrompt({ session, message: msg.message, agents: listAgents() })
+            : { message: msg.message };
+          await runtime.followUp?.(msg.sessionId, orchestration.message, msg.images);
         } catch (err: any) {
+          const session = getSession(msg.sessionId);
+          if (session) captureRuntimeFailureLearning(session, err);
           sendError(ws, err.message, msg.sessionId);
         }
         break;
@@ -515,28 +575,54 @@ wss.on('connection', async (ws: WebSocket) => {
       }
 
       case 'package_install': {
-        const pkg = installPackage(msg.source);
-        ws.send(JSON.stringify({
-          type: 'packages_updated',
-          packages: getPackages(),
-        } satisfies WsServerMsg));
-        ws.send(JSON.stringify({
-          type: 'slash_commands_updated',
-          commands: getSlashCommands(getPackages()),
-        } satisfies WsServerMsg));
+        try {
+          const snapshot = await extensionService.installPackage(msg.source, {
+            scope: msg.scope,
+            projectPath: msg.projectPath ?? getActiveProjectPath(),
+          });
+          await runtime.dispose();
+          sendResourceSnapshot(ws, snapshot);
+        } catch (err) {
+          sendError(ws, err instanceof Error ? err.message : String(err));
+        }
         break;
       }
 
       case 'package_remove': {
-        removePackage(msg.source);
-        ws.send(JSON.stringify({
-          type: 'packages_updated',
-          packages: getPackages(),
-        } satisfies WsServerMsg));
-        ws.send(JSON.stringify({
-          type: 'slash_commands_updated',
-          commands: getSlashCommands(getPackages()),
-        } satisfies WsServerMsg));
+        try {
+          const snapshot = await extensionService.removePackage(msg.source, {
+            scope: msg.scope,
+            projectPath: msg.projectPath ?? getActiveProjectPath(),
+          });
+          await runtime.dispose();
+          sendResourceSnapshot(ws, snapshot);
+        } catch (err) {
+          sendError(ws, err instanceof Error ? err.message : String(err));
+        }
+        break;
+      }
+
+      case 'package_update': {
+        try {
+          const snapshot = await extensionService.updatePackage(msg.source, {
+            projectPath: msg.projectPath ?? getActiveProjectPath(),
+          });
+          await runtime.dispose();
+          sendResourceSnapshot(ws, snapshot);
+        } catch (err) {
+          sendError(ws, err instanceof Error ? err.message : String(err));
+        }
+        break;
+      }
+
+      case 'resources_reload': {
+        try {
+          const snapshot = await extensionService.reload(msg.projectPath ?? getActiveProjectPath());
+          await runtime.dispose();
+          sendResourceSnapshot(ws, snapshot);
+        } catch (err) {
+          sendError(ws, err instanceof Error ? err.message : String(err));
+        }
         break;
       }
 
@@ -547,7 +633,7 @@ wss.on('connection', async (ws: WebSocket) => {
       }
 
       case 'terminal_start': {
-        void terminalService.start(msg.sessionId, msg.terminalId, { cols: msg.cols, rows: msg.rows });
+        void terminalService.start(msg.sessionId, msg.terminalId, { cols: msg.cols, rows: msg.rows }, msg.replay !== false, sendToClient);
         break;
       }
 
@@ -582,7 +668,6 @@ wss.on('connection', async (ws: WebSocket) => {
       transcriptRecorder.completeInterrupted(sessionId);
     });
     activeResponses.clear();
-    terminalService.dispose();
     void runtime.dispose();
   });
 
@@ -690,6 +775,7 @@ function normalizeOrigin(value: string | string[] | undefined): string | null {
 }
 
 async function getDiagnostics() {
+  const resourceSnapshot = extensionService.getCachedSnapshot(getAllSessions()[0]?.projectPath);
   return {
     ok: true,
     server: {
@@ -722,8 +808,11 @@ async function getDiagnostics() {
       agents: listAgents().length,
       permissionRules: loadPermissionRules().length,
       permissionAuditEntries: loadPermissionAudit(500).length,
-      packages: getPackages().length,
-      extensions: getExtensions().length,
+      packages: resourceSnapshot?.packages.length ?? getPackages().length,
+      extensions: resourceSnapshot?.extensions.length ?? getExtensions().length,
+      skills: resourceSnapshot?.skills.length ?? 0,
+      prompts: resourceSnapshot?.prompts.length ?? 0,
+      resourceDiagnostics: resourceSnapshot?.diagnostics.length ?? 0,
       themes: getThemes().length,
     },
     providers: getProviders().map((provider) => ({
@@ -732,6 +821,38 @@ async function getDiagnostics() {
       models: provider.models.length,
     })),
   };
+}
+
+async function safeResourceSnapshot(projectPath?: string): Promise<ExtensionResourceSnapshotData | null> {
+  try {
+    return await extensionService.getSnapshot(projectPath);
+  } catch (err) {
+    console.warn('[PiServer] Failed to load extension resources:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+function sendResourceSnapshot(ws: WebSocket, snapshot: ExtensionResourceSnapshotData): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'packages_updated', packages: snapshot.packages } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'extensions_updated', extensions: snapshot.extensions } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'skills_updated', skills: snapshot.skills } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'prompts_updated', prompts: snapshot.prompts } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'themes_updated', themes: mergeThemes(getThemes(), snapshot.themes) } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'resource_diagnostics_updated', diagnostics: snapshot.diagnostics } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'marketplace_updated', marketplace: snapshot.marketplace } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'resource_trust_updated', trust: snapshot.trust } satisfies WsServerMsg));
+  ws.send(JSON.stringify({ type: 'slash_commands_updated', commands: snapshot.slashCommands } satisfies WsServerMsg));
+}
+
+function mergeThemes(baseThemes: ThemeData[], resourceThemes: ThemeData[]): ThemeData[] {
+  const byName = new Map<string, ThemeData>();
+  for (const theme of baseThemes) byName.set(theme.name, theme);
+  for (const theme of resourceThemes) {
+    if (!theme.name || byName.has(theme.name)) continue;
+    byName.set(theme.name, theme);
+  }
+  return Array.from(byName.values());
 }
 
 async function getSdkDiagnostics() {

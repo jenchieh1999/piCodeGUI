@@ -7,6 +7,7 @@ import {
   incrementSessionMessageCount,
   setSessionStatus,
 } from './mock-agent.js';
+import { extensionService } from './extension-service.js';
 import type {
   FileChangeData,
   PermissionRequestData,
@@ -18,6 +19,7 @@ import type {
   ToolUseData,
 } from './types.js';
 import { getWorkspaceStatus } from './workspace-service.js';
+import { getAuthPath, getModelsPath } from './agent-paths.js';
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent');
 type PiAgentSession = import('@earendil-works/pi-coding-agent').AgentSession;
@@ -25,6 +27,8 @@ type PiAgentSessionEvent = import('@earendil-works/pi-coding-agent').AgentSessio
 
 interface PiRuntimeSession {
   appSessionId: string;
+  cwd: string;
+  resourceRevision: number;
   session: PiAgentSession;
   unsubscribe: () => void;
   callbacks: RuntimeCallbacks;
@@ -148,14 +152,23 @@ export class PiAgentRuntime implements AgentRuntime {
   }
 
   private async ensureSession(appSessionId: string, callbacks: RuntimeCallbacks): Promise<PiRuntimeSession> {
-    const existing = this.sessions.get(appSessionId);
-    if (existing) return existing;
-
-    const sdk = await this.loadSdk();
     const appSession = getSession(appSessionId);
     const cwd = resolveProjectPath(appSession?.projectPath ?? '.');
-    const authStorage = sdk.AuthStorage.create();
-    const modelRegistry = sdk.ModelRegistry.create(authStorage);
+    const resourceContext = await extensionService.getRuntimeContext(cwd);
+    const existing = this.sessions.get(appSessionId);
+    if (existing && existing.cwd === cwd && existing.resourceRevision === resourceContext.revision) {
+      return existing;
+    }
+
+    if (existing) {
+      existing.unsubscribe();
+      existing.session.dispose();
+      this.sessions.delete(appSessionId);
+    }
+
+    const sdk = await this.loadSdk();
+    const authStorage = sdk.AuthStorage.create(getAuthPath());
+    const modelRegistry = sdk.ModelRegistry.create(authStorage, getModelsPath());
     const sessionManager = sdk.SessionManager.inMemory(cwd);
     const selectedModel = this.selectedModel
       ? modelRegistry.find(this.selectedModel.provider, this.selectedModel.modelId)
@@ -166,6 +179,9 @@ export class PiAgentRuntime implements AgentRuntime {
       authStorage,
       modelRegistry,
       sessionManager,
+      settingsManager: resourceContext.settingsManager,
+      resourceLoader: resourceContext.resourceLoader,
+      agentDir: resourceContext.agentDir,
       model: selectedModel,
       thinkingLevel: this.thinkingLevel as any,
       tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
@@ -174,6 +190,8 @@ export class PiAgentRuntime implements AgentRuntime {
 
     const runtimeSession: PiRuntimeSession = {
       appSessionId,
+      cwd,
+      resourceRevision: resourceContext.revision,
       session,
       callbacks,
       currentMessageId: undefined,

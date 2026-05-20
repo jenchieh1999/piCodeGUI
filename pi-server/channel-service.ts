@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash, createHmac } from 'node:crypto';
+import { createDecipheriv, createHash, createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
@@ -66,6 +66,20 @@ interface WechatAccessTokenCacheEntry {
   expiresAt: number;
 }
 
+interface FeishuTenantAccessTokenCacheEntry {
+  token: string;
+  expiresAt: number;
+}
+
+interface WechatQrLoginSession {
+  channelId: string;
+  sessionKey: string;
+  qrcode: string;
+  qrcodeUrl: string;
+  startedAt: number;
+  currentApiBaseUrl: string;
+}
+
 interface PendingChannelPermission {
   approvalId: string;
   channelId: string;
@@ -76,6 +90,8 @@ interface PendingChannelPermission {
 
 let serviceInstance: ChannelService | null = null;
 const wechatAccessTokenCache = new Map<string, WechatAccessTokenCacheEntry>();
+const feishuTenantAccessTokenCache = new Map<string, FeishuTenantAccessTokenCacheEntry>();
+const wechatQrLoginSessions = new Map<string, WechatQrLoginSession>();
 
 export function createChannelService(options: ChannelServiceOptions): ChannelService {
   serviceInstance = new ChannelService(options);
@@ -93,8 +109,11 @@ export class ChannelService {
   private readonly permissionBroker = new PermissionBroker();
   private readonly pendingPermissions = new Map<string, PendingChannelPermission>();
   private readonly activeResponses = new Map<string, AbortController>();
+  private readonly wechatMonitors = new Map<string, AbortController>();
 
-  constructor(private readonly options: ChannelServiceOptions) {}
+  constructor(private readonly options: ChannelServiceOptions) {
+    setTimeout(() => this.syncWechatMonitors(), 0);
+  }
 
   async handleRequest(req: IncomingMessage): Promise<ChannelHttpResponse | null> {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -129,6 +148,19 @@ export class ChannelService {
 
       if (parts.length === 4 && parts[3] === 'test' && req.method === 'POST') {
         return this.json(200, await this.testChannel(parts[2]!));
+      }
+
+      if (parts.length === 4 && parts[3] === 'pairing' && req.method === 'POST') {
+        return this.json(200, this.createPairing(parts[2]!));
+      }
+
+      if (parts.length === 5 && parts[3] === 'wechat-qr' && parts[4] === 'start' && req.method === 'POST') {
+        return this.json(200, await this.startWechatQrLogin(parts[2]!));
+      }
+
+      if (parts.length === 5 && parts[3] === 'wechat-qr' && parts[4] === 'status' && req.method === 'POST') {
+        const input = await readJsonBody<{ sessionKey?: string; verifyCode?: string }>(req);
+        return this.json(200, await this.pollWechatQrLogin(parts[2]!, input));
       }
 
       if (parts.length === 4 && parts[3] === 'inbound' && req.method === 'POST') {
@@ -179,7 +211,7 @@ export class ChannelService {
       encryptionKey: normalizeString(input.encryptionKey),
       appId: normalizeString(input.appId),
       appSecret: normalizeString(input.appSecret),
-      defaultRecipientId: normalizeString(input.defaultRecipientId),
+      defaultRecipientId: normalizeRecipientId(input.defaultRecipientId),
       defaultProjectPath: normalizeString(input.defaultProjectPath),
       defaultSessionId: normalizeString(input.defaultSessionId),
       autoCreateSession: input.autoCreateSession ?? true,
@@ -207,7 +239,7 @@ export class ChannelService {
         encryptionKey: input.encryptionKey !== undefined ? normalizeString(input.encryptionKey) : channel.encryptionKey,
         appId: input.appId !== undefined ? normalizeString(input.appId) : channel.appId,
         appSecret: input.appSecret !== undefined ? normalizeString(input.appSecret) : channel.appSecret,
-        defaultRecipientId: input.defaultRecipientId !== undefined ? normalizeString(input.defaultRecipientId) : channel.defaultRecipientId,
+        defaultRecipientId: input.defaultRecipientId !== undefined ? normalizeRecipientId(input.defaultRecipientId) : channel.defaultRecipientId,
         defaultProjectPath: input.defaultProjectPath !== undefined ? normalizeString(input.defaultProjectPath) : channel.defaultProjectPath,
         defaultSessionId: input.defaultSessionId !== undefined ? normalizeString(input.defaultSessionId) : channel.defaultSessionId,
         autoCreateSession: input.autoCreateSession !== undefined ? Boolean(input.autoCreateSession) : channel.autoCreateSession,
@@ -238,6 +270,22 @@ export class ChannelService {
     if (!channel) return { ok: false, message: 'Channel not found' };
 
     try {
+      if (
+        channel.provider === 'feishu'
+        && channel.appId
+        && channel.appSecret
+        && !channel.defaultRecipientId
+        && !channel.lastRecipientId
+        && !channel.webhookUrl
+      ) {
+        await getFeishuTenantAccessToken(channel.appId, channel.appSecret);
+        const updated = this.patchChannelRuntimeState(channel.id, {
+          lastTestAt: Date.now(),
+          lastError: undefined,
+        });
+        return { ok: true, message: 'Feishu credentials verified.', channel: updated ?? channel };
+      }
+
       await this.sendChannelMessage(channel, `Pi Agent channel test: ${channel.name}`);
       const updated = this.patchChannelRuntimeState(channel.id, {
         lastTestAt: Date.now(),
@@ -251,6 +299,167 @@ export class ChannelService {
         lastError: message,
       });
       return { ok: false, message, channel: updated ?? channel };
+    }
+  }
+
+  private createPairing(
+    id: string,
+  ): { ok: boolean; message: string; channel?: ChannelConfigData; pairingCode?: string; expiresAt?: number } {
+    const channel = this.getChannel(id);
+    if (!channel) return { ok: false, message: 'Channel not found' };
+
+    const pairingCode = randomInt(100000, 1000000).toString();
+    const expiresAt = Date.now() + 10 * 60 * 1000;
+    const updated = this.patchChannelRuntimeState(channel.id, {
+      pairingCode,
+      pairingExpiresAt: expiresAt,
+      lastError: undefined,
+    });
+
+    return {
+      ok: true,
+      message: 'Pairing code generated. Send it to the bot from Feishu/WeChat to bind the recipient.',
+      channel: updated ?? { ...channel, pairingCode, pairingExpiresAt: expiresAt, lastError: undefined },
+      pairingCode,
+      expiresAt,
+    };
+  }
+
+  private async startWechatQrLogin(
+    id: string,
+  ): Promise<{ ok: boolean; message: string; channel?: ChannelConfigData; sessionKey?: string; qrcodeUrl?: string; expiresAt?: number }> {
+    const channel = this.getChannel(id);
+    if (!channel) return { ok: false, message: 'Channel not found' };
+    if (channel.provider !== 'wechat') return { ok: false, message: 'Channel provider mismatch' };
+
+    try {
+      purgeExpiredWechatQrSessions();
+      const qr = await fetchWechatQrCode(this.readStore().channels);
+      const sessionKey = randomUUID();
+      const expiresAt = Date.now() + WECHAT_QR_LOGIN_TTL_MS;
+      wechatQrLoginSessions.set(sessionKey, {
+        channelId: channel.id,
+        sessionKey,
+        qrcode: qr.qrcode,
+        qrcodeUrl: qr.qrcodeUrl,
+        startedAt: Date.now(),
+        currentApiBaseUrl: WECHAT_ILINK_BASE_URL,
+      });
+      const updated = this.patchChannelRuntimeState(channel.id, { lastError: undefined });
+      return {
+        ok: true,
+        message: 'WeChat QR code generated. Scan it with WeChat and confirm on the phone.',
+        channel: updated ?? channel,
+        sessionKey,
+        qrcodeUrl: qr.qrcodeUrl,
+        expiresAt,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const updated = this.patchChannelRuntimeState(channel.id, { lastError: message });
+      return { ok: false, message, channel: updated ?? channel };
+    }
+  }
+
+  private async pollWechatQrLogin(
+    id: string,
+    input: { sessionKey?: string; verifyCode?: string },
+  ): Promise<{
+    ok: boolean;
+    message: string;
+    channel?: ChannelConfigData;
+    status?: string;
+    connected?: boolean;
+    alreadyConnected?: boolean;
+    sessionKey?: string;
+    needsVerifyCode?: boolean;
+  }> {
+    const channel = this.getChannel(id);
+    if (!channel) return { ok: false, message: 'Channel not found' };
+    if (channel.provider !== 'wechat') return { ok: false, message: 'Channel provider mismatch' };
+
+    purgeExpiredWechatQrSessions();
+    const sessionKey = normalizeString(input.sessionKey);
+    const session = sessionKey ? wechatQrLoginSessions.get(sessionKey) : undefined;
+    if (!session || session.channelId !== channel.id) {
+      return { ok: false, message: 'WeChat QR login session expired. Generate a new QR code.' };
+    }
+    const activeSessionKey = session.sessionKey;
+
+    try {
+      const status = await pollWechatQrStatus(session.currentApiBaseUrl, session.qrcode, normalizeString(input.verifyCode));
+      if (status.status === 'scaned_but_redirect' && status.redirect_host) {
+        session.currentApiBaseUrl = `https://${status.redirect_host}`;
+      }
+
+      if (status.status === 'need_verifycode') {
+        return {
+          ok: true,
+          message: 'Enter the verification code shown on your phone.',
+          status: status.status,
+          sessionKey: activeSessionKey,
+          needsVerifyCode: true,
+        };
+      }
+
+      if (status.status === 'binded_redirect') {
+        wechatQrLoginSessions.delete(activeSessionKey);
+        return {
+          ok: true,
+          message: 'This WeChat account is already connected.',
+          status: status.status,
+          sessionKey: activeSessionKey,
+          connected: Boolean(channel.wechatBotToken),
+          alreadyConnected: true,
+          channel,
+        };
+      }
+
+      if (status.status === 'confirmed') {
+        if (!status.bot_token || !status.ilink_bot_id) {
+          wechatQrLoginSessions.delete(activeSessionKey);
+          const updated = this.patchChannelRuntimeState(channel.id, { lastError: 'WeChat login confirmed but token was missing.' });
+          return { ok: false, message: 'WeChat login confirmed but token was missing.', channel: updated ?? channel, status: status.status };
+        }
+
+        wechatQrLoginSessions.delete(activeSessionKey);
+        const updated = this.patchChannelRuntimeState(channel.id, {
+          wechatBotToken: status.bot_token,
+          wechatBotId: status.ilink_bot_id,
+          wechatUserId: status.ilink_user_id,
+          wechatBaseUrl: status.baseurl || session.currentApiBaseUrl || WECHAT_ILINK_BASE_URL,
+          defaultRecipientId: status.ilink_user_id,
+          lastRecipientId: status.ilink_user_id,
+          wechatSyncCursor: undefined,
+          lastError: undefined,
+          lastTestAt: Date.now(),
+        });
+        this.syncWechatMonitors();
+        return {
+          ok: true,
+          message: 'WeChat connected. Pi Agent is now listening for WeChat messages.',
+          status: status.status,
+          sessionKey: activeSessionKey,
+          connected: true,
+          channel: updated ?? channel,
+        };
+      }
+
+      if (status.status === 'expired' || status.status === 'verify_code_blocked') {
+        wechatQrLoginSessions.delete(activeSessionKey);
+      }
+
+      return {
+        ok: true,
+        message: wechatQrStatusMessage(status.status),
+        status: status.status,
+        sessionKey: activeSessionKey,
+        connected: false,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const updated = this.patchChannelRuntimeState(channel.id, { lastError: message });
+      return { ok: false, message, channel: updated ?? channel, sessionKey: activeSessionKey };
     }
   }
 
@@ -332,6 +541,9 @@ export class ChannelService {
       return { ok: false, accepted: false, message: 'Channel is disabled.' };
     }
 
+    const pairingResult = await this.tryResolvePairing(channel, inbound);
+    if (pairingResult) return pairingResult;
+
     const commandResult = this.tryResolvePermissionCommand(channel, inbound.text);
     if (commandResult) {
       await this.sendChannelMessage(channel, commandResult.message, recipientForInbound(channel, inbound)).catch(() => undefined);
@@ -354,6 +566,7 @@ export class ChannelService {
     this.patchChannelRuntimeState(channel.id, {
       lastEventAt: Date.now(),
       lastRecipientId: recipientForInbound(channel, inbound),
+      lastContextToken: inbound.contextToken,
       lastError: undefined,
     });
 
@@ -368,6 +581,7 @@ export class ChannelService {
     const replyChannel = {
       ...channel,
       lastRecipientId: recipientForInbound(channel, inbound),
+      lastContextToken: inbound.contextToken,
     };
     void this.runChannelPrompt(replyChannel, session.id, promptText, agent).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
@@ -381,6 +595,74 @@ export class ChannelService {
       message: 'Message accepted.',
       sessionId: session.id,
     };
+  }
+
+  private async tryResolvePairing(
+    channel: ChannelConfigData,
+    inbound: ChannelInboundEventData,
+  ): Promise<{ ok: boolean; accepted: boolean; message: string; sessionId?: string } | null> {
+    const pairingCode = normalizeString(channel.pairingCode);
+    if (!pairingCode) return null;
+
+    const isExpired = Boolean(channel.pairingExpiresAt && channel.pairingExpiresAt <= Date.now());
+    if (!matchesPairingCode(inbound.text, pairingCode)) {
+      if (isExpired) {
+        this.patchChannelRuntimeState(channel.id, {
+          pairingCode: undefined,
+          pairingExpiresAt: undefined,
+        });
+      }
+      return null;
+    }
+
+    const liveRecipient = recipientForInbound(channel, inbound);
+    if (isExpired) {
+      this.patchChannelRuntimeState(channel.id, {
+        pairingCode: undefined,
+        pairingExpiresAt: undefined,
+        lastError: 'Channel pairing code expired.',
+      });
+      if (liveRecipient) {
+        await this.sendChannelMessage(channel, 'Pi Agent pairing code expired. Generate a new pairing code in the desktop app.', liveRecipient)
+          .catch(() => undefined);
+      }
+      return { ok: false, accepted: false, message: 'Pairing code expired.' };
+    }
+
+    const defaultRecipient = defaultRecipientForInbound(channel, inbound);
+    if (!defaultRecipient || !liveRecipient) {
+      const message = 'Unable to bind channel recipient from this message.';
+      this.patchChannelRuntimeState(channel.id, { lastError: message });
+      return { ok: false, accepted: false, message };
+    }
+
+    const updated = this.patchChannelRuntimeState(channel.id, {
+      defaultRecipientId: defaultRecipient,
+      lastRecipientId: liveRecipient,
+      lastContextToken: inbound.contextToken,
+      pairingCode: undefined,
+      pairingExpiresAt: undefined,
+      lastEventAt: Date.now(),
+      lastError: undefined,
+    });
+    const replyChannel = {
+      ...channel,
+      ...(updated ?? {}),
+      defaultRecipientId: defaultRecipient,
+      lastRecipientId: liveRecipient,
+      lastContextToken: inbound.contextToken,
+      pairingCode: undefined,
+      pairingExpiresAt: undefined,
+    };
+
+    await this.sendChannelMessage(replyChannel, 'Pi Agent channel paired. You can now send messages to this bot from here.', liveRecipient)
+      .catch((err) => {
+        this.patchChannelRuntimeState(channel.id, {
+          lastError: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+    return { ok: true, accepted: true, message: 'Channel paired.' };
   }
 
   private async runChannelPrompt(
@@ -523,13 +805,32 @@ export class ChannelService {
   }
 
   private async sendChannelMessage(channel: ChannelConfigData, text: string, recipientId?: string): Promise<void> {
-    if (channel.provider === 'wechat') {
-      const officialRecipient = recipientId
+    if (channel.provider === 'feishu') {
+      const feishuRecipient = recipientId
         || channel.lastRecipientId
         || channel.defaultRecipientId;
-      if (channel.appId && channel.appSecret && officialRecipient) {
+      if (channel.appId && channel.appSecret && feishuRecipient) {
         try {
-          await sendWechatOfficialText(channel, officialRecipient, text);
+          await sendFeishuAppText(channel, feishuRecipient, text);
+          return;
+        } catch (err) {
+          if (!channel.webhookUrl) throw err;
+          console.warn('[PiServer] Feishu app message failed, falling back to webhook:', err);
+        }
+      }
+    }
+
+    if (channel.provider === 'wechat') {
+      const wechatRecipient = recipientId
+        || channel.lastRecipientId
+        || channel.defaultRecipientId;
+      if (channel.wechatBotToken && wechatRecipient) {
+        await sendWechatPersonalText(channel, wechatRecipient, text, channel.lastContextToken);
+        return;
+      }
+      if (channel.appId && channel.appSecret && wechatRecipient) {
+        try {
+          await sendWechatOfficialText(channel, wechatRecipient, text);
           return;
         } catch (err) {
           if (!channel.webhookUrl) throw err;
@@ -542,7 +843,7 @@ export class ChannelService {
     if (!webhookUrl) {
       throw new Error(channel.provider === 'wechat'
         ? 'WeChat appId/appSecret with recipient OpenID or webhook URL is not configured.'
-        : 'Webhook URL is not configured.');
+        : 'Feishu App ID/App Secret with recipient chat/open ID or webhook URL is not configured.');
     }
 
     const payload = channel.provider === 'feishu'
@@ -568,6 +869,75 @@ export class ChannelService {
       setSessionModel(sessionId, model);
     }
     await Promise.resolve(this.runtime.setModel(agent.modelProvider, agent.modelId));
+  }
+
+  private syncWechatMonitors(): void {
+    const channels = this.readStore().channels;
+    const activeIds = new Set(
+      channels
+        .filter((channel) => channel.provider === 'wechat' && channel.enabled && Boolean(channel.wechatBotToken))
+        .map((channel) => channel.id),
+    );
+
+    for (const [channelId, controller] of this.wechatMonitors) {
+      if (!activeIds.has(channelId)) {
+        controller.abort();
+        this.wechatMonitors.delete(channelId);
+      }
+    }
+
+    for (const channel of channels) {
+      if (!activeIds.has(channel.id) || this.wechatMonitors.has(channel.id)) continue;
+      const controller = new AbortController();
+      this.wechatMonitors.set(channel.id, controller);
+      void this.runWechatMonitor(channel.id, controller.signal);
+    }
+  }
+
+  private async runWechatMonitor(channelId: string, signal: AbortSignal): Promise<void> {
+    let consecutiveFailures = 0;
+    while (!signal.aborted) {
+      const channel = this.getChannel(channelId);
+      if (!channel || channel.provider !== 'wechat' || !channel.enabled || !channel.wechatBotToken) break;
+
+      try {
+        const response = await getWechatPersonalUpdates(channel, signal);
+        const isError = (response.ret !== undefined && response.ret !== 0) || (response.errcode !== undefined && response.errcode !== 0);
+        if (isError) {
+          const message = response.errmsg || `WeChat getupdates failed: ret=${response.ret ?? response.errcode}`;
+          this.patchChannelRuntimeState(channel.id, { lastError: message });
+          consecutiveFailures += 1;
+          await sleep(consecutiveFailures >= 3 ? 30_000 : 3000, signal);
+          if (consecutiveFailures >= 3) consecutiveFailures = 0;
+          continue;
+        }
+
+        consecutiveFailures = 0;
+        if (response.get_updates_buf) {
+          this.patchChannelRuntimeState(channel.id, {
+            wechatSyncCursor: response.get_updates_buf,
+            lastError: undefined,
+          });
+        }
+
+        for (const message of response.msgs ?? []) {
+          if (signal.aborted) break;
+          const inbound = normalizeWechatPersonalInbound(channel, message);
+          if (!inbound) continue;
+          await this.acceptInbound(channel, inbound);
+        }
+
+        await sleep(500, signal);
+      } catch (err: any) {
+        if (signal.aborted || err?.name === 'AbortError') break;
+        const message = err instanceof Error ? err.message : String(err);
+        this.patchChannelRuntimeState(channelId, { lastError: message });
+        consecutiveFailures += 1;
+        await sleep(consecutiveFailures >= 3 ? 30_000 : 3000, signal);
+        if (consecutiveFailures >= 3) consecutiveFailures = 0;
+      }
+    }
+    this.wechatMonitors.delete(channelId);
   }
 
   private resolveChannelSession(channel: ChannelConfigData, agent: AgentConfigData | null) {
@@ -609,7 +979,22 @@ export class ChannelService {
 
   private patchChannelRuntimeState(
     id: string,
-    patch: Partial<Pick<ChannelConfigData, 'lastEventAt' | 'lastError' | 'lastTestAt' | 'lastRecipientId'>>,
+    patch: Partial<Pick<
+      ChannelConfigData,
+      | 'lastEventAt'
+      | 'lastError'
+      | 'lastTestAt'
+      | 'lastRecipientId'
+      | 'lastContextToken'
+      | 'defaultRecipientId'
+      | 'pairingCode'
+      | 'pairingExpiresAt'
+      | 'wechatBotToken'
+      | 'wechatBotId'
+      | 'wechatUserId'
+      | 'wechatBaseUrl'
+      | 'wechatSyncCursor'
+    >>,
   ): ChannelConfigData | null {
     let updated: ChannelConfigData | null = null;
     const channels = this.readStore().channels.map((channel) => {
@@ -640,6 +1025,7 @@ export class ChannelService {
     const tmp = `${this.channelsPath}.tmp`;
     writeFileSync(tmp, `${JSON.stringify({ channels }, null, 2)}\n`, 'utf8');
     renameSync(tmp, this.channelsPath);
+    setTimeout(() => this.syncWechatMonitors(), 0);
   }
 
   private json(status: number, body: unknown): ChannelHttpResponse {
@@ -663,8 +1049,16 @@ function normalizeStoredChannel(raw: unknown): ChannelConfigData | null {
     encryptionKey: normalizeString(record.encryptionKey),
     appId: normalizeString(record.appId),
     appSecret: normalizeString(record.appSecret),
-    defaultRecipientId: normalizeString(record.defaultRecipientId),
+    wechatBotToken: normalizeString(record.wechatBotToken),
+    wechatBotId: normalizeString(record.wechatBotId),
+    wechatUserId: normalizeString(record.wechatUserId),
+    wechatBaseUrl: normalizeString(record.wechatBaseUrl),
+    wechatSyncCursor: normalizeString(record.wechatSyncCursor),
+    defaultRecipientId: normalizeRecipientId(record.defaultRecipientId),
     lastRecipientId: normalizeString(record.lastRecipientId),
+    lastContextToken: normalizeString(record.lastContextToken),
+    pairingCode: normalizeString(record.pairingCode),
+    pairingExpiresAt: normalizeNumber(record.pairingExpiresAt),
     defaultProjectPath: normalizeString(record.defaultProjectPath),
     defaultSessionId: normalizeString(record.defaultSessionId),
     autoCreateSession: record.autoCreateSession !== false,
@@ -729,9 +1123,60 @@ function normalizeWechatInbound(channel: ChannelConfigData, rawBody: string): Ch
   };
 }
 
+function normalizeWechatPersonalInbound(channel: ChannelConfigData, message: WechatPersonalMessage): ChannelInboundEventData | null {
+  if (message.message_type !== undefined && message.message_type !== WECHAT_MESSAGE_TYPE_USER) return null;
+  const text = extractWechatPersonalText(message);
+  if (!text) return null;
+  const fromUserId = normalizeString(message.from_user_id);
+  if (!fromUserId) return null;
+
+  return {
+    channelId: channel.id,
+    provider: 'wechat',
+    text,
+    chatId: normalizeString(message.session_id) || fromUserId,
+    userId: fromUserId,
+    messageId: message.message_id !== undefined ? String(message.message_id) : normalizeString(message.client_id),
+    contextToken: normalizeString(message.context_token),
+    raw: message,
+  };
+}
+
+function extractWechatPersonalText(message: WechatPersonalMessage): string {
+  for (const item of message.item_list ?? []) {
+    if (item.type === WECHAT_MESSAGE_ITEM_TEXT && item.text_item?.text != null) {
+      return String(item.text_item.text).trim();
+    }
+  }
+  return '';
+}
+
 function recipientForInbound(channel: ChannelConfigData, inbound: ChannelInboundEventData): string | undefined {
+  if (channel.provider === 'feishu') {
+    return inbound.chatId || inbound.userId || channel.defaultRecipientId;
+  }
   if (channel.provider !== 'wechat') return undefined;
   return inbound.replyToUserId || inbound.userId || inbound.chatId || channel.defaultRecipientId;
+}
+
+function defaultRecipientForInbound(channel: ChannelConfigData, inbound: ChannelInboundEventData): string | undefined {
+  if (channel.provider === 'feishu') {
+    if (inbound.chatId) return `chat_id:${inbound.chatId}`;
+    if (inbound.userId) return `open_id:${inbound.userId}`;
+    return normalizeRecipientId(channel.defaultRecipientId);
+  }
+  if (channel.provider === 'wechat') {
+    return inbound.replyToUserId || inbound.userId || inbound.chatId || normalizeRecipientId(channel.defaultRecipientId);
+  }
+  return undefined;
+}
+
+function matchesPairingCode(text: string, pairingCode: string): boolean {
+  const code = pairingCode.trim();
+  if (!code) return false;
+  const trimmed = text.trim();
+  if (trimmed === code) return true;
+  return new RegExp(`(^|\\D)${escapeRegExp(code)}(\\D|$)`).test(trimmed);
 }
 
 function formatInboundDisplay(
@@ -784,6 +1229,292 @@ function createUserMessage(sessionId: string, text: string): ChatMessageData {
   };
 }
 
+const WECHAT_ILINK_BASE_URL = 'https://ilinkai.weixin.qq.com';
+const WECHAT_ILINK_APP_ID = 'bot';
+const WECHAT_ILINK_CLIENT_VERSION = buildWechatClientVersion('2.4.3');
+const WECHAT_QR_LOGIN_TTL_MS = 5 * 60 * 1000;
+const WECHAT_MESSAGE_TYPE_USER = 1;
+const WECHAT_MESSAGE_TYPE_BOT = 2;
+const WECHAT_MESSAGE_STATE_FINISH = 2;
+const WECHAT_MESSAGE_ITEM_TEXT = 1;
+
+interface WechatQrCodeResponse {
+  qrcode: string;
+  qrcodeUrl: string;
+}
+
+interface WechatQrStatusResponse {
+  status: 'wait' | 'scaned' | 'confirmed' | 'expired' | 'scaned_but_redirect' | 'need_verifycode' | 'verify_code_blocked' | 'binded_redirect';
+  bot_token?: string;
+  ilink_bot_id?: string;
+  ilink_user_id?: string;
+  baseurl?: string;
+  redirect_host?: string;
+}
+
+interface WechatPersonalMessageItem {
+  type?: number;
+  text_item?: { text?: string };
+}
+
+interface WechatPersonalMessage {
+  seq?: number;
+  message_id?: number;
+  from_user_id?: string;
+  to_user_id?: string;
+  client_id?: string;
+  session_id?: string;
+  message_type?: number;
+  message_state?: number;
+  item_list?: WechatPersonalMessageItem[];
+  context_token?: string;
+}
+
+interface WechatPersonalUpdatesResponse {
+  ret?: number;
+  errcode?: number;
+  errmsg?: string;
+  msgs?: WechatPersonalMessage[];
+  get_updates_buf?: string;
+  longpolling_timeout_ms?: number;
+}
+
+function purgeExpiredWechatQrSessions(): void {
+  const now = Date.now();
+  for (const [sessionKey, session] of wechatQrLoginSessions) {
+    if (now - session.startedAt > WECHAT_QR_LOGIN_TTL_MS) {
+      wechatQrLoginSessions.delete(sessionKey);
+    }
+  }
+}
+
+async function fetchWechatQrCode(channels: ChannelConfigData[]): Promise<WechatQrCodeResponse> {
+  const body = JSON.stringify({
+    local_token_list: channels
+      .map((channel) => channel.wechatBotToken)
+      .filter((token): token is string => Boolean(token))
+      .slice(-10),
+  });
+  const rawText = await wechatApiPost({
+    baseUrl: WECHAT_ILINK_BASE_URL,
+    endpoint: 'ilink/bot/get_bot_qrcode?bot_type=3',
+    body,
+    label: 'wechatQrCode',
+    timeoutMs: 15_000,
+  });
+  const result = JSON.parse(rawText) as Record<string, unknown>;
+  const qrcode = normalizeString(result.qrcode);
+  const qrcodeUrl = normalizeString(result.qrcode_img_content);
+  if (!qrcode || !qrcodeUrl) {
+    throw new Error(normalizeString(result.errmsg) || 'WeChat QR code response was incomplete.');
+  }
+  return { qrcode, qrcodeUrl };
+}
+
+async function pollWechatQrStatus(
+  baseUrl: string,
+  qrcode: string,
+  verifyCode?: string,
+): Promise<WechatQrStatusResponse> {
+  let endpoint = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
+  if (verifyCode) endpoint += `&verify_code=${encodeURIComponent(verifyCode)}`;
+  try {
+    const rawText = await wechatApiGet({
+      baseUrl,
+      endpoint,
+      label: 'wechatQrStatus',
+      timeoutMs: 15_000,
+    });
+    const result = JSON.parse(rawText) as WechatQrStatusResponse;
+    return result.status ? result : { status: 'wait' };
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return { status: 'wait' };
+    throw err;
+  }
+}
+
+async function getWechatPersonalUpdates(
+  channel: ChannelConfigData,
+  signal?: AbortSignal,
+): Promise<WechatPersonalUpdatesResponse> {
+  if (!channel.wechatBotToken) throw new Error('WeChat personal bot token is not configured.');
+  const rawText = await wechatApiPost({
+    baseUrl: channel.wechatBaseUrl || WECHAT_ILINK_BASE_URL,
+    endpoint: 'ilink/bot/getupdates',
+    token: channel.wechatBotToken,
+    body: JSON.stringify({
+      get_updates_buf: channel.wechatSyncCursor || '',
+      base_info: wechatBaseInfo(),
+    }),
+    label: 'wechatGetUpdates',
+    timeoutMs: 35_000,
+    signal,
+  });
+  return JSON.parse(rawText) as WechatPersonalUpdatesResponse;
+}
+
+async function sendWechatPersonalText(
+  channel: ChannelConfigData,
+  recipientId: string,
+  text: string,
+  contextToken?: string,
+): Promise<void> {
+  if (!channel.wechatBotToken) throw new Error('WeChat personal QR channel is not connected.');
+  await wechatApiPost({
+    baseUrl: channel.wechatBaseUrl || WECHAT_ILINK_BASE_URL,
+    endpoint: 'ilink/bot/sendmessage',
+    token: channel.wechatBotToken,
+    timeoutMs: 15_000,
+    label: 'wechatSendMessage',
+    body: JSON.stringify({
+      msg: {
+        from_user_id: '',
+        to_user_id: recipientId,
+        client_id: `pi-agent-wechat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        message_type: WECHAT_MESSAGE_TYPE_BOT,
+        message_state: WECHAT_MESSAGE_STATE_FINISH,
+        item_list: text ? [{ type: WECHAT_MESSAGE_ITEM_TEXT, text_item: { text } }] : undefined,
+        context_token: contextToken || undefined,
+      },
+      base_info: wechatBaseInfo(),
+    }),
+  });
+}
+
+async function wechatApiGet(params: {
+  baseUrl: string;
+  endpoint: string;
+  label: string;
+  timeoutMs?: number;
+}): Promise<string> {
+  const url = new URL(params.endpoint, ensureTrailingSlash(params.baseUrl));
+  const controller = params.timeoutMs ? new AbortController() : undefined;
+  const timer = controller && params.timeoutMs ? setTimeout(() => controller.abort(), params.timeoutMs) : undefined;
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: wechatCommonHeaders(),
+      signal: controller?.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${params.label} ${response.status}: ${text}`);
+    return text;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function wechatApiPost(params: {
+  baseUrl: string;
+  endpoint: string;
+  body: string;
+  label: string;
+  token?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const url = new URL(params.endpoint, ensureTrailingSlash(params.baseUrl));
+  const controller = params.timeoutMs ? new AbortController() : undefined;
+  const timer = controller && params.timeoutMs ? setTimeout(() => controller.abort(), params.timeoutMs) : undefined;
+  const signal = anySignal([params.signal, controller?.signal].filter(Boolean) as AbortSignal[]);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: wechatHeaders(params.token),
+      body: params.body,
+      signal,
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${params.label} ${response.status}: ${text}`);
+    return text;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function wechatHeaders(token?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'AuthorizationType': 'ilink_bot_token',
+    'X-WECHAT-UIN': Buffer.from(String(randomBytes(4).readUInt32BE(0)), 'utf8').toString('base64'),
+    ...wechatCommonHeaders(),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+function wechatCommonHeaders(): Record<string, string> {
+  return {
+    'iLink-App-Id': WECHAT_ILINK_APP_ID,
+    'iLink-App-ClientVersion': String(WECHAT_ILINK_CLIENT_VERSION),
+  };
+}
+
+function wechatBaseInfo(): Record<string, string> {
+  return {
+    channel_version: '2.4.3',
+    bot_agent: 'PiAgent/0.1.0 OpenClaw/2.4.3',
+  };
+}
+
+function wechatQrStatusMessage(status: string | undefined): string {
+  switch (status) {
+    case 'wait':
+      return 'Waiting for WeChat scan.';
+    case 'scaned':
+      return 'QR code scanned. Confirm on your phone.';
+    case 'scaned_but_redirect':
+      return 'QR code scanned. Switching WeChat login region.';
+    case 'need_verifycode':
+      return 'Enter the verification code shown on your phone.';
+    case 'expired':
+      return 'QR code expired. Generate a new one.';
+    case 'verify_code_blocked':
+      return 'Too many wrong verification codes. Generate a new QR code later.';
+    default:
+      return 'Waiting for WeChat login.';
+  }
+}
+
+function buildWechatClientVersion(version: string): number {
+  const parts = version.split('.').map((part) => parseInt(part, 10));
+  const major = parts[0] ?? 0;
+  const minor = parts[1] ?? 0;
+  const patch = parts[2] ?? 0;
+  return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff);
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith('/') ? value : `${value}/`;
+}
+
+function anySignal(signals: AbortSignal[]): AbortSignal | undefined {
+  const activeSignals = signals.filter(Boolean);
+  if (activeSignals.length === 0) return undefined;
+  if (activeSignals.length === 1) return activeSignals[0];
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of activeSignals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+  }
+  return controller.signal;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
 function decryptFeishuBodyIfNeeded(channel: ChannelConfigData, body: Record<string, unknown>): Record<string, unknown> {
   const encrypted = normalizeString(body.encrypt);
   if (!encrypted) return body;
@@ -826,6 +1557,94 @@ function wechatWebhookPayload(text: string) {
     msgtype: 'text',
     text: { content: text },
   };
+}
+
+async function sendFeishuAppText(
+  channel: ChannelConfigData,
+  recipientId: string,
+  text: string,
+): Promise<void> {
+  if (!channel.appId || !channel.appSecret) {
+    throw new Error('Feishu App ID/App Secret is not configured.');
+  }
+
+  const accessToken = await getFeishuTenantAccessToken(channel.appId, channel.appSecret);
+  const recipient = parseFeishuRecipientId(recipientId);
+  const url = new URL('https://open.feishu.cn/open-apis/im/v1/messages');
+  url.searchParams.set('receive_id_type', recipient.type);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify({
+      receive_id: recipient.id,
+      msg_type: 'text',
+      content: JSON.stringify({ text }),
+    }),
+  });
+
+  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const code = typeof result.code === 'number' ? result.code : undefined;
+  if (!response.ok || (code !== undefined && code !== 0)) {
+    throw new Error(normalizeString(result.msg) || normalizeString(result.error) || `Feishu message failed with ${response.status}`);
+  }
+}
+
+async function getFeishuTenantAccessToken(appId: string, appSecret: string): Promise<string> {
+  const cacheKey = appId;
+  const cached = feishuTenantAccessTokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now() + 30_000) {
+    return cached.token;
+  }
+
+  const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({
+      app_id: appId,
+      app_secret: appSecret,
+    }),
+  });
+
+  const result = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const accessToken = normalizeString(result.tenant_access_token);
+  const expire = typeof result.expire === 'number' ? result.expire : 7200;
+  const code = typeof result.code === 'number' ? result.code : undefined;
+  if (!response.ok || !accessToken || (code !== undefined && code !== 0)) {
+    throw new Error(normalizeString(result.msg) || normalizeString(result.error) || `Feishu tenant_access_token request failed with ${response.status}`);
+  }
+
+  feishuTenantAccessTokenCache.set(cacheKey, {
+    token: accessToken,
+    expiresAt: Date.now() + Math.max(60, expire - 300) * 1000,
+  });
+  return accessToken;
+}
+
+function parseFeishuRecipientId(value: string): { type: 'open_id' | 'user_id' | 'union_id' | 'chat_id'; id: string } {
+  const trimmed = value.trim();
+  if (!trimmed || /_xxx\b/i.test(trimmed) || /\s\/\s/.test(trimmed)) {
+    throw new Error('Feishu recipient is not configured. Use chat_id:oc_xxx or open_id:ou_xxx, or bind with a pairing code.');
+  }
+  const explicit = /^(open_id|user_id|union_id|chat_id):(.+)$/i.exec(trimmed);
+  if (explicit) {
+    const id = explicit[2]!.trim();
+    if (!id || /_xxx\b/i.test(id)) {
+      throw new Error('Feishu recipient is not configured. Use chat_id:oc_xxx or open_id:ou_xxx, or bind with a pairing code.');
+    }
+    return {
+      type: explicit[1]!.toLowerCase() as 'open_id' | 'user_id' | 'union_id' | 'chat_id',
+      id,
+    };
+  }
+
+  if (trimmed.startsWith('oc_')) return { type: 'chat_id', id: trimmed };
+  if (trimmed.startsWith('ou_')) return { type: 'open_id', id: trimmed };
+  if (trimmed.startsWith('on_')) return { type: 'union_id', id: trimmed };
+  return { type: 'chat_id', id: trimmed };
 }
 
 async function sendWechatOfficialText(
@@ -937,6 +1756,20 @@ function normalizeString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
+function normalizeRecipientId(value: unknown): string | undefined {
+  const recipientId = normalizeString(value);
+  if (!recipientId) return undefined;
+  const lower = recipientId.toLowerCase();
+  if (
+    lower === 'chat_id:oc_xxx / open_id:ou_xxx'
+    || lower.includes('oc_xxx')
+    || lower.includes('ou_xxx')
+  ) {
+    return undefined;
+  }
+  return recipientId;
+}
+
 function normalizeNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
@@ -989,6 +1822,10 @@ function escapeXmlText(value: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function readJsonBody<T>(req: IncomingMessage): Promise<T> {

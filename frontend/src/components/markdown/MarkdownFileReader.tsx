@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject, type UIEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+  type UIEvent,
+} from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
   Check,
@@ -17,12 +26,21 @@ import { piApi } from '../../api/client';
 import type { WorkspaceReadFileResult, WorkspaceWriteFileResult } from '../../types';
 import { useUIStore } from '../../stores/uiStore';
 import { useI18n } from '../../lib/i18n';
-import { applyDomSearchHighlights, clearDomSearchHighlights, type TextSearchState } from '../../lib/textSearch';
+import {
+  applyDomSearchHighlights,
+  clearDomSearchHighlights,
+  getSearchSeedFromDocument,
+  getSearchSeedFromTextArea,
+  type TextSearchState,
+} from '../../lib/textSearch';
 import { SearchReplaceBar } from '../shared/SearchReplaceBar';
 import { cn } from '../shared/utils';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { isRedoShortcut, isUndoShortcut, useTextUndoHistory } from '../../hooks/useTextUndoHistory';
 
 type MarkdownViewMode = 'preview' | 'split' | 'source';
+
+const MARKDOWN_INDENT = '  ';
 
 interface MarkdownFileReaderProps {
   sessionId: string;
@@ -53,10 +71,17 @@ export function MarkdownFileReader({
   const [error, setError] = useState<string | null>(null);
   const [searchVisible, setSearchVisible] = useState(false);
   const [replaceVisible, setReplaceVisible] = useState(false);
+  const [searchSeed, setSearchSeed] = useState<{ query: string; version: number }>({ query: '', version: 0 });
   const [searchState, setSearchState] = useState<TextSearchState | null>(null);
   const sourceScrollRef = useRef<HTMLTextAreaElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const syncingScrollRef = useRef<'source' | 'preview' | null>(null);
+  const {
+    applyChange: applyContentChange,
+    undo: undoContentChange,
+    redo: redoContentChange,
+    resetHistory: resetContentHistory,
+  } = useTextUndoHistory({ value: content, setValue: setContent, inputRef: sourceScrollRef });
 
   const dirty = content !== savedContent;
 
@@ -104,10 +129,11 @@ export function MarkdownFileReader({
     }
     const nextContent = file.content ?? '';
     setContent(nextContent);
+    resetContentHistory(nextContent);
     setSavedContent(nextContent);
     setSize(file.size);
     setError(null);
-  }, [t]);
+  }, [resetContentHistory, t]);
 
   const loadFile = useCallback(async () => {
     setLoading(true);
@@ -129,11 +155,12 @@ export function MarkdownFileReader({
     }
 
     setContent(initialContent);
+    resetContentHistory(initialContent);
     setSavedContent(initialContent);
     setSize(initialSize ?? initialContent.length);
     setError(null);
     setLoading(false);
-  }, [filePath, initialContent, initialSize, loadFile]);
+  }, [filePath, initialContent, initialSize, loadFile, resetContentHistory]);
 
   const saveFile = useCallback(async () => {
     if (!dirty || saving) return;
@@ -158,6 +185,19 @@ export function MarkdownFileReader({
     }
   }, [addToast, content, dirty, filePath, onSaved, saving, sessionId, t]);
 
+  const getSelectedSearchSeed = useCallback(() => (
+    getSearchSeedFromTextArea(sourceScrollRef.current) || getSearchSeedFromDocument()
+  ), []);
+
+  const openSearch = useCallback((withReplace: boolean) => {
+    const query = getSelectedSearchSeed();
+    if (query) {
+      setSearchSeed((current) => ({ query, version: current.version + 1 }));
+    }
+    setSearchVisible(true);
+    setReplaceVisible(withReplace);
+  }, [getSelectedSearchSeed]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
@@ -165,18 +205,16 @@ export function MarkdownFileReader({
         void saveFile();
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault();
-        setSearchVisible(true);
-        setReplaceVisible(false);
+        openSearch(false);
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') {
         event.preventDefault();
-        setSearchVisible(true);
-        setReplaceVisible(true);
+        openSearch(true);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [saveFile]);
+  }, [openSearch, saveFile]);
 
   const closeSearch = useCallback(() => {
     setSearchVisible(false);
@@ -202,7 +240,7 @@ export function MarkdownFileReader({
   }, [content, size, t]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-pi-bg">
+    <div className="relative flex h-full min-h-0 flex-col bg-pi-bg">
       <div className={cn(
         'pi-reader-toolbar-material flex flex-shrink-0 items-center gap-2 border-b px-3',
         embedded ? 'h-9' : 'h-11'
@@ -233,6 +271,12 @@ export function MarkdownFileReader({
         <button
           type="button"
           onClick={() => {
+            if (!searchVisible) {
+              const query = getSelectedSearchSeed();
+              if (query) {
+                setSearchSeed((current) => ({ query, version: current.version + 1 }));
+              }
+            }
             setSearchVisible((visible) => !visible);
             setReplaceVisible(false);
           }}
@@ -286,10 +330,12 @@ export function MarkdownFileReader({
 
       <SearchReplaceBar
         text={content}
-        onTextChange={setContent}
+        onTextChange={applyContentChange}
         textInputRef={sourceScrollRef}
         visible={searchVisible}
         replaceVisible={replaceVisible}
+        initialQuery={searchSeed.version > 0 ? searchSeed.query : undefined}
+        initialQueryVersion={searchSeed.version}
         onClose={closeSearch}
         onReplaceVisibleChange={setReplaceVisible}
         onSearchStateChange={setSearchState}
@@ -307,7 +353,9 @@ export function MarkdownFileReader({
           <div className="grid h-full min-h-0 grid-cols-2 overflow-hidden">
             <MarkdownSourceEditor
               value={content}
-              onChange={setContent}
+              onChange={applyContentChange}
+              onUndo={undoContentChange}
+              onRedo={redoContentChange}
               scrollRef={sourceScrollRef}
               onScroll={(event) => syncSplitScroll('source', event)}
             />
@@ -322,7 +370,13 @@ export function MarkdownFileReader({
             </div>
           </div>
         ) : (
-          <MarkdownSourceEditor value={content} onChange={setContent} />
+          <MarkdownSourceEditor
+            value={content}
+            onChange={applyContentChange}
+            onUndo={undoContentChange}
+            onRedo={redoContentChange}
+            scrollRef={sourceScrollRef}
+          />
         )}
       </div>
     </div>
@@ -382,11 +436,15 @@ function MarkdownPreview({
 function MarkdownSourceEditor({
   value,
   onChange,
+  onUndo,
+  onRedo,
   scrollRef,
   onScroll,
 }: {
   value: string;
   onChange: (value: string) => void;
+  onUndo: () => boolean;
+  onRedo: () => boolean;
   scrollRef?: RefObject<HTMLTextAreaElement | null>;
   onScroll?: (event: UIEvent<HTMLTextAreaElement>) => void;
 }) {
@@ -395,11 +453,118 @@ function MarkdownSourceEditor({
       ref={scrollRef}
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => handleMarkdownSourceKeyDown(event, value, onChange, onUndo, onRedo)}
       onScroll={onScroll}
       spellCheck={false}
       className="block h-full min-h-0 w-full resize-none overflow-auto overscroll-contain bg-pi-bg px-4 py-3 font-mono text-[12px] leading-relaxed text-pi-tool-output outline-none selection:bg-pi-selected-bg"
     />
   );
+}
+
+function handleMarkdownSourceKeyDown(
+  event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  value: string,
+  onChange: (value: string) => void,
+  onUndo: () => boolean,
+  onRedo: () => boolean
+) {
+  if (isUndoShortcut(event)) {
+    event.preventDefault();
+    onUndo();
+    return;
+  }
+
+  if (isRedoShortcut(event)) {
+    event.preventDefault();
+    onRedo();
+    return;
+  }
+
+  const isTabIndent = event.key === 'Tab';
+  const isShortcutIndent = (event.ctrlKey || event.metaKey) && event.key === ']';
+  const isShortcutOutdent = (event.ctrlKey || event.metaKey) && event.key === '[';
+
+  if (!isTabIndent && !isShortcutIndent && !isShortcutOutdent) return;
+
+  event.preventDefault();
+
+  const input = event.currentTarget;
+  const range = applyIndentEdit(
+    value,
+    input.selectionStart,
+    input.selectionEnd,
+    event.shiftKey || isShortcutOutdent ? 'outdent' : 'indent'
+  );
+
+  onChange(range.text);
+  window.requestAnimationFrame(() => {
+    input.setSelectionRange(range.selectionStart, range.selectionEnd);
+  });
+}
+
+function applyIndentEdit(
+  value: string,
+  selectionStart: number,
+  selectionEnd: number,
+  direction: 'indent' | 'outdent'
+): { text: string; selectionStart: number; selectionEnd: number } {
+  if (direction === 'indent' && selectionStart === selectionEnd) {
+    return {
+      text: `${value.slice(0, selectionStart)}${MARKDOWN_INDENT}${value.slice(selectionEnd)}`,
+      selectionStart: selectionStart + MARKDOWN_INDENT.length,
+      selectionEnd: selectionStart + MARKDOWN_INDENT.length,
+    };
+  }
+
+  const blockStart = value.lastIndexOf('\n', Math.max(0, selectionStart - 1)) + 1;
+  const blockEnd = findIndentBlockEnd(value, selectionStart, selectionEnd);
+  const block = value.slice(blockStart, blockEnd);
+  const lines = block.split('\n');
+
+  if (direction === 'indent') {
+    const nextBlock = lines.map((line) => `${MARKDOWN_INDENT}${line}`).join('\n');
+    const added = lines.length * MARKDOWN_INDENT.length;
+    return {
+      text: `${value.slice(0, blockStart)}${nextBlock}${value.slice(blockEnd)}`,
+      selectionStart: selectionStart + MARKDOWN_INDENT.length,
+      selectionEnd: selectionEnd + added,
+    };
+  }
+
+  let cursor = blockStart;
+  let removedBeforeStart = 0;
+  let removedBeforeEnd = 0;
+  const nextLines = lines.map((line) => {
+    const removeCount = getOutdentCount(line);
+    if (cursor < selectionStart) {
+      removedBeforeStart += Math.min(removeCount, selectionStart - cursor);
+    }
+    if (cursor < selectionEnd) {
+      removedBeforeEnd += Math.min(removeCount, selectionEnd - cursor);
+    }
+    cursor += line.length + 1;
+    return line.slice(removeCount);
+  });
+
+  return {
+    text: `${value.slice(0, blockStart)}${nextLines.join('\n')}${value.slice(blockEnd)}`,
+    selectionStart: Math.max(blockStart, selectionStart - removedBeforeStart),
+    selectionEnd: Math.max(blockStart, selectionEnd - removedBeforeEnd),
+  };
+}
+
+function findIndentBlockEnd(value: string, selectionStart: number, selectionEnd: number): number {
+  if (selectionStart !== selectionEnd && value[selectionEnd - 1] === '\n') {
+    return selectionEnd - 1;
+  }
+  const nextBreak = value.indexOf('\n', selectionEnd);
+  return nextBreak === -1 ? value.length : nextBreak;
+}
+
+function getOutdentCount(line: string): number {
+  if (line.startsWith('\t')) return 1;
+  if (line.startsWith(MARKDOWN_INDENT)) return MARKDOWN_INDENT.length;
+  return line.startsWith(' ') ? 1 : 0;
 }
 
 function ModeButton({

@@ -224,6 +224,9 @@ body {
 }
 
 .pi-composer-material {
+  position: relative;
+  z-index: 45;
+  overflow: visible;
   background: color-mix(in srgb, var(--pi-bg) 86%, transparent);
   border-color: var(--pi-hairline);
   box-shadow: inset 0 1px color-mix(in srgb, white 5%, transparent);

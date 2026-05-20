@@ -1,24 +1,39 @@
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowDownToLine } from 'lucide-react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
-import type { ChatMessage } from '../../types';
+import type { ChatMessage, PermissionRequest } from '../../types';
 import { MessageBubble } from './MessageBubble';
 import { useChatStore } from '../../stores/chatStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useI18n } from '../../lib/i18n';
 import { cn } from '../shared/utils';
+import { PermissionInlineCard } from './PermissionDialog';
 
 interface MessageListProps {
   messages: ChatMessage[];
 }
 
+type MessageListEntry =
+  | { type: 'message'; message: ChatMessage }
+  | { type: 'permission'; permission: PermissionRequest & { sessionId: string } };
+
 export function MessageList({ messages }: MessageListProps) {
   const { t } = useI18n();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const pendingPermission = useChatStore((s) => s.pendingPermission);
   const showThinking = useSettingsStore((s) => s.showThinking);
   const [isAtBottom, setIsAtBottom] = useState(true);
-  const sessionId = messages[0]?.sessionId ?? 'empty';
+  const sessionId = activeSessionId ?? messages[0]?.sessionId ?? 'empty';
+  const inlinePermission = pendingPermission?.sessionId === sessionId ? pendingPermission : null;
+  const listItems = useMemo<MessageListEntry[]>(
+    () => [
+      ...messages.map((message) => ({ type: 'message' as const, message })),
+      ...(inlinePermission ? [{ type: 'permission' as const, permission: inlinePermission }] : []),
+    ],
+    [inlinePermission, messages]
+  );
 
   useEffect(() => {
     setIsAtBottom(true);
@@ -34,29 +49,47 @@ export function MessageList({ messages }: MessageListProps) {
   );
 
   const scrollToBottom = useCallback(() => {
-    if (messages.length === 0) return;
+    if (listItems.length === 0) return;
     virtuosoRef.current?.scrollToIndex({
-      index: messages.length - 1,
+      index: listItems.length - 1,
       align: 'end',
       behavior: 'smooth',
     });
     setIsAtBottom(true);
-  }, [messages.length]);
+  }, [listItems.length]);
+
+  useEffect(() => {
+    if (!inlinePermission?.requestId) return;
+    const frame = requestAnimationFrame(() => scrollToBottom());
+    return () => cancelAnimationFrame(frame);
+  }, [inlinePermission?.requestId, scrollToBottom]);
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-transparent">
       <Virtuoso
         ref={virtuosoRef}
-        data={messages}
+        data={listItems}
         followOutput={followOutput}
         atBottomStateChange={setIsAtBottom}
-        itemContent={(index, message) => (
-          <MessageBubble
-            key={message.id}
-            message={message}
-            showThinking={showThinking}
-          />
-        )}
+        itemContent={(index, item) => {
+          if (item.type === 'permission') {
+            return (
+              <div className="px-4 py-3">
+                <div className="mx-auto max-w-3xl">
+                  <PermissionInlineCard permission={item.permission} />
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <MessageBubble
+              key={item.message.id}
+              message={item.message}
+              showThinking={showThinking}
+            />
+          );
+        }}
         className="scrollbar-thin bg-transparent"
         style={{ height: '100%', background: 'transparent' }}
         increaseViewportBy={200}

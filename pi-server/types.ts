@@ -45,6 +45,11 @@ export interface PackageData {
   name: string;
   version: string;
   source: string;
+  scope?: 'user' | 'project' | 'temporary';
+  installedPath?: string;
+  filtered?: boolean;
+  filter?: PackageResourceFilterData;
+  disabled?: boolean;
   installedAt: number;
   extensions: string[];
   skills: string[];
@@ -52,13 +57,112 @@ export interface PackageData {
   themes: string[];
 }
 
+export interface PackageResourceFilterData {
+  extensions?: string[];
+  skills?: string[];
+  prompts?: string[];
+  themes?: string[];
+}
+
 export interface ExtensionData {
   name: string;
   path: string;
   enabled: boolean;
-  scope: 'user' | 'project';
+  scope: 'user' | 'project' | 'temporary';
   source: 'package' | 'local';
+  sourceName?: string;
+  origin?: 'package' | 'top-level';
   description?: string;
+  tools?: string[];
+  commands?: string[];
+  flags?: string[];
+  shortcuts?: string[];
+  errors?: string[];
+}
+
+export interface SkillData {
+  name: string;
+  description: string;
+  filePath: string;
+  baseDir?: string;
+  enabled: boolean;
+  scope: 'user' | 'project' | 'temporary';
+  source: 'package' | 'local';
+  sourceName?: string;
+  origin?: 'package' | 'top-level';
+  disableModelInvocation?: boolean;
+  command?: string;
+}
+
+export interface PromptTemplateData {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  filePath: string;
+  enabled: boolean;
+  scope: 'user' | 'project' | 'temporary';
+  source: 'package' | 'local';
+  sourceName?: string;
+  origin?: 'package' | 'top-level';
+  command: string;
+}
+
+export interface ResourceDiagnosticData {
+  type: 'info' | 'warning' | 'error' | 'collision';
+  resourceType?: 'extension' | 'skill' | 'prompt' | 'theme' | 'package';
+  message: string;
+  path?: string;
+  source?: string;
+  name?: string;
+  winnerPath?: string;
+  loserPath?: string;
+}
+
+export interface PackageProgressData {
+  type: 'start' | 'progress' | 'complete' | 'error';
+  action: 'install' | 'remove' | 'update' | 'clone' | 'pull' | 'reload';
+  source: string;
+  message?: string;
+  timestamp: number;
+}
+
+export interface ExtensionResourceSnapshotData {
+  projectPath: string;
+  packages: PackageData[];
+  extensions: ExtensionData[];
+  skills: SkillData[];
+  prompts: PromptTemplateData[];
+  themes: ThemeData[];
+  diagnostics: ResourceDiagnosticData[];
+  slashCommands: SlashCommandData[];
+  marketplace: MarketplacePackageData[];
+  trust: ResourceTrustRecordData[];
+}
+
+export type ResourceTrustDecisionData = 'trusted' | 'untrusted' | 'blocked';
+export type ResourceTrustKindData = 'package' | 'extension' | 'skill' | 'prompt' | 'theme';
+
+export interface ResourceTrustRecordData {
+  id: string;
+  kind: ResourceTrustKindData;
+  name: string;
+  source?: string;
+  path?: string;
+  decision: ResourceTrustDecisionData;
+  scope?: 'user' | 'project' | 'temporary';
+  updatedAt: number;
+  reason?: string;
+}
+
+export interface MarketplacePackageData {
+  id: string;
+  name: string;
+  source: string;
+  description: string;
+  tags: string[];
+  recommendedScope: 'user' | 'project';
+  trustLevel: 'official' | 'community' | 'local';
+  installed: boolean;
 }
 
 export interface ThemeData {
@@ -80,8 +184,16 @@ export interface ChannelConfigData {
   encryptionKey?: string;
   appId?: string;
   appSecret?: string;
+  wechatBotToken?: string;
+  wechatBotId?: string;
+  wechatUserId?: string;
+  wechatBaseUrl?: string;
+  wechatSyncCursor?: string;
   defaultRecipientId?: string;
   lastRecipientId?: string;
+  lastContextToken?: string;
+  pairingCode?: string;
+  pairingExpiresAt?: number;
   defaultProjectPath?: string;
   defaultSessionId?: string;
   autoCreateSession: boolean;
@@ -100,9 +212,50 @@ export interface ChannelInboundEventData {
   userId?: string;
   userName?: string;
   messageId?: string;
+  contextToken?: string;
   replyFromUserId?: string;
   replyToUserId?: string;
   raw?: unknown;
+}
+
+export type AgentRoleData =
+  | 'main'
+  | 'subagent'
+  | 'planner'
+  | 'implementer'
+  | 'reviewer'
+  | 'tester'
+  | 'documenter'
+  | 'researcher'
+  | 'custom';
+
+export interface AgentSubAgentConfigData {
+  enabled: boolean;
+  autoDelegate: boolean;
+  triggers: string[];
+  maxParallel: number;
+  reviewRequired: boolean;
+  outputContract: string;
+}
+
+export interface AgentSelfImprovementConfigData {
+  enabled: boolean;
+  captureCorrections: boolean;
+  captureFailures: boolean;
+  projectMemory: boolean;
+  includeRecentLearnings: boolean;
+}
+
+export interface AgentLearningRecordData {
+  id: string;
+  type: 'correction' | 'failure' | 'preference' | 'workflow' | 'insight';
+  title: string;
+  content: string;
+  projectPath?: string;
+  agentId?: string;
+  tags: string[];
+  createdAt: number;
+  source: 'manual' | 'auto';
 }
 
 export interface AgentConfigData {
@@ -111,6 +264,10 @@ export interface AgentConfigData {
   description: string;
   systemPrompt: string;
   enabled: boolean;
+  role: AgentRoleData;
+  parentAgentId?: string;
+  subAgent: AgentSubAgentConfigData;
+  selfImprovement: AgentSelfImprovementConfigData;
   modelProvider?: string;
   modelId?: string;
   projectPath?: string;
@@ -219,12 +376,19 @@ export interface ThinkingBlockData {
 }
 
 export interface MessageContentData {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'permission_request';
+  type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking' | 'permission_request';
   text?: string;
+  image?: ImageAttachmentData;
   toolUse?: ToolUseData;
   toolResult?: ToolResultData;
   thinking?: ThinkingBlockData;
   permissionRequest?: PermissionRequestData;
+}
+
+export interface ImageAttachmentData {
+  data: string;
+  mimeType: string;
+  fileName?: string;
 }
 
 export interface ToolCallData extends ToolUseData {
@@ -258,7 +422,7 @@ export interface SlashCommandData {
   name: string;
   description: string;
   category?: string;
-  source?: 'runtime' | 'extension' | 'builtin';
+  source?: 'runtime' | 'extension' | 'builtin' | 'skill' | 'prompt';
   insertText?: string;
 }
 
@@ -305,9 +469,9 @@ export interface RepositoryContextResultData {
 
 // WebSocket protocol messages
 export type WsClientMsg =
-  | { type: 'prompt'; sessionId: string; message: string; images?: Array<{ data: string; mimeType: string }> }
-  | { type: 'steer'; sessionId: string; message: string; images?: Array<{ data: string; mimeType: string }> }
-  | { type: 'follow_up'; sessionId: string; message: string; images?: Array<{ data: string; mimeType: string }> }
+  | { type: 'prompt'; sessionId: string; message: string; images?: ImageAttachmentData[] }
+  | { type: 'steer'; sessionId: string; message: string; images?: ImageAttachmentData[] }
+  | { type: 'follow_up'; sessionId: string; message: string; images?: ImageAttachmentData[] }
   | { type: 'permission_response'; sessionId: string; response: { action: PermissionAction; requestId: string; scope?: PermissionScopeData } }
   | { type: 'set_permission_mode'; mode: PermissionModeData }
   | { type: 'stop_generation'; sessionId: string }
@@ -316,14 +480,17 @@ export type WsClientMsg =
   | { type: 'set_thinking_level'; level: ThinkingLevel; sessionId?: string }
   | { type: 'session_create'; projectPath: string; branch?: string | null; worktree?: boolean }
   | { type: 'session_delete'; sessionId: string }
+  | { type: 'session_clear'; sessionId: string }
   | { type: 'session_rename'; sessionId: string; title: string }
   | { type: 'session_tree_navigate'; sessionId: string; targetId: string }
   | { type: 'session_compact'; sessionId: string }
   | { type: 'session_fork'; sessionId: string; entryId: string }
-  | { type: 'package_install'; source: string }
-  | { type: 'package_remove'; source: string }
+  | { type: 'package_install'; source: string; scope?: 'user' | 'project'; projectPath?: string }
+  | { type: 'package_remove'; source: string; scope?: 'user' | 'project'; projectPath?: string }
+  | { type: 'package_update'; source?: string; projectPath?: string }
+  | { type: 'resources_reload'; projectPath?: string }
   | { type: 'theme_set'; name: string }
-  | { type: 'terminal_start'; sessionId: string; terminalId?: string; cols?: number; rows?: number }
+  | { type: 'terminal_start'; sessionId: string; terminalId?: string; cols?: number; rows?: number; replay?: boolean }
   | { type: 'terminal_input'; terminalId: string; data: string }
   | { type: 'terminal_resize'; terminalId: string; cols: number; rows: number }
   | { type: 'terminal_stop'; terminalId: string }
@@ -338,7 +505,12 @@ export type WsServerMsg =
       providers?: ProviderData[];
       packages?: PackageData[];
       extensions?: ExtensionData[];
+      skills?: SkillData[];
+      prompts?: PromptTemplateData[];
       themes?: ThemeData[];
+      resourceDiagnostics?: ResourceDiagnosticData[];
+      marketplace?: MarketplacePackageData[];
+      trust?: ResourceTrustRecordData[];
       messagesBySession?: Record<string, ChatMessageData[]>;
       runtimeInfo?: RuntimeInfoData;
       slashCommands?: SlashCommandData[];
@@ -358,6 +530,7 @@ export type WsServerMsg =
   | { type: 'session_updated'; session: SessionData }
   | { type: 'session_created'; session: SessionData; messages?: ChatMessageData[] }
   | { type: 'session_deleted'; sessionId: string }
+  | { type: 'session_cleared'; sessionId: string }
   | { type: 'queue_update'; sessionId: string; steering: number; followUp: number }
   | { type: 'compaction_start'; sessionId: string }
   | { type: 'compaction_end'; sessionId: string }
@@ -368,6 +541,12 @@ export type WsServerMsg =
   | { type: 'themes_updated'; themes: ThemeData[] }
   | { type: 'packages_updated'; packages: PackageData[] }
   | { type: 'extensions_updated'; extensions: ExtensionData[] }
+  | { type: 'skills_updated'; skills: SkillData[] }
+  | { type: 'prompts_updated'; prompts: PromptTemplateData[] }
+  | { type: 'resource_diagnostics_updated'; diagnostics: ResourceDiagnosticData[] }
+  | { type: 'marketplace_updated'; marketplace: MarketplacePackageData[] }
+  | { type: 'resource_trust_updated'; trust: ResourceTrustRecordData[] }
+  | { type: 'package_progress'; progress: PackageProgressData }
   | { type: 'runtime_updated'; runtimeInfo: RuntimeInfoData }
   | { type: 'slash_commands_updated'; commands: SlashCommandData[] }
   | { type: 'file_changes'; sessionId: string; changes: FileChangeData[] }

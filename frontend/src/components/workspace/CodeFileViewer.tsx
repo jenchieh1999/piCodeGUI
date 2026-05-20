@@ -4,6 +4,8 @@ import { piApi } from '../../api/client';
 import type { WorkspaceReadFileResult } from '../../types';
 import { useUIStore } from '../../stores/uiStore';
 import { useI18n } from '../../lib/i18n';
+import { getSearchSeedFromDocument, getSearchSeedFromTextArea } from '../../lib/textSearch';
+import { isRedoShortcut, isUndoShortcut, useTextUndoHistory } from '../../hooks/useTextUndoHistory';
 import { SearchReplaceBar } from '../shared/SearchReplaceBar';
 import { cn } from '../shared/utils';
 
@@ -25,8 +27,15 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
   const [saving, setSaving] = useState(false);
   const [searchVisible, setSearchVisible] = useState(false);
   const [replaceVisible, setReplaceVisible] = useState(false);
+  const [searchSeed, setSearchSeed] = useState<{ query: string; version: number }>({ query: '', version: 0 });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
+  const {
+    applyChange: applyContentChange,
+    undo: undoContentChange,
+    redo: redoContentChange,
+    resetHistory: resetContentHistory,
+  } = useTextUndoHistory({ value: content, setValue: setContent, inputRef: editorRef });
 
   const loadFile = useCallback(async () => {
     setLoading(true);
@@ -37,6 +46,7 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
       if (nextFile.state === 'ok' && nextFile.previewType !== 'image') {
         const nextContent = nextFile.content ?? '';
         setContent(nextContent);
+        resetContentHistory(nextContent);
         setSavedContent(nextContent);
       }
     } catch (err) {
@@ -44,7 +54,7 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
     } finally {
       setLoading(false);
     }
-  }, [filePath, sessionId]);
+  }, [filePath, resetContentHistory, sessionId]);
 
   useEffect(() => {
     void loadFile();
@@ -79,6 +89,19 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
     }
   }, [addToast, content, dirty, filePath, saving, sessionId, t]);
 
+  const getSelectedSearchSeed = useCallback(() => (
+    getSearchSeedFromTextArea(editorRef.current) || getSearchSeedFromDocument()
+  ), []);
+
+  const openSearch = useCallback((withReplace: boolean) => {
+    const query = getSelectedSearchSeed();
+    if (query) {
+      setSearchSeed((current) => ({ query, version: current.version + 1 }));
+    }
+    setSearchVisible(true);
+    setReplaceVisible(withReplace);
+  }, [getSelectedSearchSeed]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
@@ -86,18 +109,16 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
         void saveFile();
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault();
-        setSearchVisible(true);
-        setReplaceVisible(false);
+        openSearch(false);
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'h') {
         event.preventDefault();
-        setSearchVisible(true);
-        setReplaceVisible(true);
+        openSearch(true);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [saveFile]);
+  }, [openSearch, saveFile]);
 
   const copyFile = async () => {
     if (!content) return;
@@ -118,7 +139,7 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-pi-bg text-pi-text">
+    <div className="relative flex h-full min-h-0 flex-col bg-pi-bg text-pi-text">
       <div className="pi-reader-toolbar-material flex h-11 flex-shrink-0 items-center gap-2 border-b px-3">
         <FileCode2 size={15} className="flex-shrink-0 text-pi-accent" />
         <div className="min-w-0 flex-1">
@@ -128,6 +149,12 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
         <button
           type="button"
           onClick={() => {
+            if (!searchVisible) {
+              const query = getSelectedSearchSeed();
+              if (query) {
+                setSearchSeed((current) => ({ query, version: current.version + 1 }));
+              }
+            }
             setSearchVisible((visible) => !visible);
             setReplaceVisible(false);
           }}
@@ -194,10 +221,12 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
 
       <SearchReplaceBar
         text={content}
-        onTextChange={setContent}
+        onTextChange={applyContentChange}
         textInputRef={editorRef}
         visible={searchVisible}
         replaceVisible={replaceVisible}
+        initialQuery={searchSeed.version > 0 ? searchSeed.query : undefined}
+        initialQueryVersion={searchSeed.version}
         readOnly={!editable}
         onClose={() => setSearchVisible(false)}
         onReplaceVisibleChange={setReplaceVisible}
@@ -239,7 +268,18 @@ export function CodeFileViewer({ sessionId, filePath }: CodeFileViewerProps) {
             <textarea
               ref={editorRef}
               value={content}
-              onChange={(event) => setContent(event.target.value)}
+              onChange={(event) => applyContentChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (isUndoShortcut(event)) {
+                  event.preventDefault();
+                  undoContentChange();
+                  return;
+                }
+                if (isRedoShortcut(event)) {
+                  event.preventDefault();
+                  redoContentChange();
+                }
+              }}
               onScroll={syncLineNumberScroll}
               spellCheck={false}
               wrap={wrapLines ? 'soft' : 'off'}

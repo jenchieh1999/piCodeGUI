@@ -24,6 +24,8 @@ import type {
 } from '../../types';
 import { piApi } from '../../api/client';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
+import { createNewSessionFromPicker, openProjectsLauncher } from '../../lib/sessionActions';
+import { readWorkspaceFileDragPayload } from '../../lib/workspaceDrag';
 import { useUIStore } from '../../stores/uiStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useModelStore } from '../../stores/modelStore';
@@ -48,7 +50,7 @@ import {
 } from 'lucide-react';
 
 interface ChatInputProps {
-  onSend: (text: string, images?: Array<{ data: string; mimeType: string }>, displayText?: string) => boolean | void;
+  onSend: (text: string, images?: ImageAttachment[], displayText?: string) => boolean | void;
   onStop: () => void;
   isStreaming: boolean;
   sessionId: string;
@@ -129,8 +131,15 @@ const FALLBACK_SLASH_COMMANDS: Array<{
   { name: '/commit', descriptionKey: 'chat.slash.commit', categoryKey: 'chat.category.git', source: 'builtin' },
   { name: '/review', descriptionKey: 'chat.slash.review', categoryKey: 'chat.category.code', source: 'builtin' },
   { name: '/debug', descriptionKey: 'chat.slash.debug', categoryKey: 'chat.category.code', source: 'builtin' },
+  { name: '/test', descriptionKey: 'chat.slash.test', categoryKey: 'chat.category.code', source: 'builtin' },
+  { name: '/explain', descriptionKey: 'chat.slash.explain', categoryKey: 'chat.category.code', source: 'builtin' },
   { name: '/compact', descriptionKey: 'chat.slash.compact', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/clear', descriptionKey: 'chat.slash.clear', categoryKey: 'chat.category.session', source: 'builtin' },
   { name: '/tree', descriptionKey: 'chat.slash.tree', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/fork', descriptionKey: 'chat.slash.fork', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/new', descriptionKey: 'chat.slash.new', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/projects', descriptionKey: 'chat.slash.projects', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/memory', descriptionKey: 'chat.slash.memory', categoryKey: 'chat.category.runtime', source: 'builtin' },
 ];
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
@@ -336,6 +345,23 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   }, [addFileReference, sessionId]);
 
   useEffect(() => {
+    const dispose = window.piDesktop?.onWorkspaceReference((detail) => {
+      if (!detail?.path) return;
+      if (detail.sessionId && detail.sessionId !== sessionId) return;
+      addFileReference(detail.path, {
+        name: detail.name,
+        lineStart: detail.lineStart,
+        lineEnd: detail.lineEnd,
+        excerpt: detail.excerpt,
+        sourceKind: detail.sourceKind,
+      });
+      textareaRef.current?.focus();
+    });
+
+    return () => dispose?.();
+  }, [addFileReference, sessionId]);
+
+  useEffect(() => {
     if (!showFileSearch) return;
 
     const requestId = ++searchRequestRef.current;
@@ -422,10 +448,16 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     if (isPreparingPrompt || !canSubmit) return;
 
     const trimmed = text.trim();
+    if (attachments.length === 0 && fileReferences.length === 0 && await runWorkbenchSlashCommand(trimmed)) {
+      clearComposer();
+      closeFileSearch();
+      setShowSlashMenu(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
     const references = fileReferences;
-    const images = attachments.length > 0
-      ? attachments.map((attachment) => ({ data: attachment.data, mimeType: attachment.mimeType }))
-      : undefined;
+    const images = attachments.length > 0 ? attachments : undefined;
 
     setIsPreparingPrompt(true);
     try {
@@ -437,10 +469,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       const sent = onSend(modelText, images, displayText);
       if (sent === false) return;
 
-      setText('');
-      setAttachments([]);
-      setFileReferences([]);
-      draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+      clearComposer();
       closeFileSearch();
       setShowSlashMenu(false);
       textareaRef.current?.focus();
@@ -452,6 +481,47 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       });
     } finally {
       setIsPreparingPrompt(false);
+    }
+  };
+
+  const clearComposer = () => {
+    setText('');
+    setAttachments([]);
+    setFileReferences([]);
+    draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+  };
+
+  const runWorkbenchSlashCommand = async (value: string): Promise<boolean> => {
+    const command = value.split(/\s+/)[0]?.toLowerCase();
+    if (!command) return false;
+
+    switch (command) {
+      case '/projects': {
+        openProjectsLauncher();
+        addToast({ type: 'info', message: t('chat.command.projectsOpened') });
+        return true;
+      }
+      case '/new': {
+        await createNewSessionFromPicker();
+        return true;
+      }
+      case '/clear': {
+        const sent = piApi.send({ type: 'session_clear', sessionId });
+        if (!sent) {
+          addToast({
+            type: 'error',
+            message: t('chat.command.clearDisconnected'),
+            duration: 6000,
+          });
+          return true;
+        }
+        useChatStore.getState().clearMessages(sessionId);
+        useChatStore.getState().stopStreaming(sessionId);
+        addToast({ type: 'success', message: t('chat.command.cleared') });
+        return true;
+      }
+      default:
+        return false;
     }
   };
 
@@ -477,6 +547,10 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     const sent = piApi.send({ type: 'set_thinking_level', sessionId, level });
     if (!sent) {
       addToast({ type: 'error', message: t('chat.switchThinkingDisconnected') });
+      return;
+    }
+    if (activeSession) {
+      useChatStore.getState().updateSession({ ...activeSession, thinkingLevel: level, updatedAt: Date.now() });
     }
     setOpenControlMenu(null);
   };
@@ -573,6 +647,22 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    const workspacePayload = readWorkspaceFileDragPayload(event.dataTransfer);
+    if (workspacePayload) {
+      if (workspacePayload.sessionId !== sessionId) {
+        addToast({ type: 'warning', message: t('chat.workspaceDropDifferentSession') });
+        return;
+      }
+      if (workspacePayload.isDirectory) {
+        addToast({ type: 'warning', message: t('chat.workspaceDropFolderUnsupported') });
+        return;
+      }
+
+      addFileReference(workspacePayload.path, { name: workspacePayload.name });
+      textareaRef.current?.focus();
+      return;
+    }
+
     void appendComposerFiles(Array.from(event.dataTransfer.files));
   };
 
@@ -691,7 +781,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   }
 
   return (
-    <div className="pi-composer-material border-t" onDrop={handleDrop} onDragOver={(event) => event.preventDefault()}>
+    <div className="pi-composer-material relative z-[45] overflow-visible border-t" onDrop={handleDrop} onDragOver={(event) => event.preventDefault()}>
       {(fileReferences.length > 0 || attachments.length > 0) && (
         <div className="flex items-center gap-2 px-3 pt-2 pb-1 flex-wrap">
           {fileReferences.map((ref) => (
@@ -809,7 +899,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
 
         <div className="flex-1 relative">
           {showFileSearch && (
-            <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-lg">
+            <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-[90] mb-2 overflow-hidden rounded-lg">
               <div className="flex h-8 items-center gap-2 border-b border-pi-border/70 px-3 text-xs text-pi-dim">
                 <Search size={13} className="flex-shrink-0" />
                 <span className="min-w-0 flex-1 truncate">
@@ -931,13 +1021,35 @@ function ComposerControlBar({
 }) {
   const { t } = useI18n();
   const selectedPermission = PERMISSION_MODE_OPTIONS.find((option) => option === permissionMode) ?? PERMISSION_MODE_OPTIONS[0]!;
+  const [compact, setCompact] = useState(false);
+
+  useEffect(() => {
+    const node = refEl.current;
+    if (!node) return;
+
+    const updateCompact = () => {
+      setCompact(node.clientWidth < 520);
+    };
+
+    updateCompact();
+
+    const observer = new ResizeObserver(updateCompact);
+    observer.observe(node);
+    window.addEventListener('resize', updateCompact);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateCompact);
+    };
+  }, [refEl]);
 
   return (
-    <div ref={refEl} className="relative flex items-center gap-1.5 px-3 pt-2">
+    <div ref={refEl} className="relative z-[70] flex min-w-0 items-center gap-1.5 px-3 pt-2">
       <ComposerControlButton
         icon={<Bot size={12} />}
         label={currentModel?.name ?? t('chat.noModel')}
         active={openMenu === 'model'}
+        compact={compact}
         title={t('chat.modelTitle')}
         onClick={() => onToggleMenu('model')}
       />
@@ -945,6 +1057,7 @@ function ComposerControlBar({
         icon={<Shield size={12} />}
         label={permissionModeLabel(selectedPermission, t)}
         active={openMenu === 'permission'}
+        compact={compact}
         tone={permissionMode === 'bypassPermissions' ? 'warning' : undefined}
         title={t('chat.permissionMode')}
         onClick={() => onToggleMenu('permission')}
@@ -953,14 +1066,16 @@ function ComposerControlBar({
         icon={<Brain size={12} />}
         label={thinkingLevelLabel(thinkingLevel, t)}
         active={openMenu === 'thinking'}
+        compact={compact}
         title={t('chat.thinkingLevel')}
         onClick={() => onToggleMenu('thinking')}
       />
-      {activeSession && <WorkspaceSwitcher activeSession={activeSession} placement="toolbar" />}
+      {activeSession && <WorkspaceSwitcher activeSession={activeSession} placement="toolbar" compact={compact} />}
       <button
         onClick={onOpenUsage}
         className={cn(
-          'flex h-7 min-w-0 max-w-[190px] flex-shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+          'flex h-7 min-w-0 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+          compact ? 'max-w-[76px]' : 'max-w-[190px]',
           contextUsage.percent > 85
             ? 'border-pi-error/40 bg-pi-error/10 text-pi-error'
             : contextUsage.percent > 65
@@ -974,7 +1089,7 @@ function ComposerControlBar({
       </button>
 
       {openMenu === 'model' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.modelTitle')}</div>
           <div className="max-h-[280px] overflow-y-auto py-1">
             {availableModels.length === 0 ? (
@@ -1004,7 +1119,7 @@ function ComposerControlBar({
       )}
 
       {openMenu === 'permission' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.permissionTitle')}</div>
           <div className="py-1">
             {PERMISSION_MODE_OPTIONS.map((option) => (
@@ -1028,7 +1143,7 @@ function ComposerControlBar({
       )}
 
       {openMenu === 'thinking' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.thinkingTitle')}</div>
           <div className="grid grid-cols-2 gap-1 p-2">
             {THINKING_LEVELS.map((level) => (
@@ -1057,6 +1172,7 @@ function ComposerControlButton({
   label,
   active,
   tone,
+  compact,
   title,
   onClick,
 }: {
@@ -1064,14 +1180,17 @@ function ComposerControlButton({
   label: string;
   active?: boolean;
   tone?: 'warning';
+  compact?: boolean;
   title: string;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
+      aria-label={title}
       className={cn(
-        'flex h-7 min-w-0 max-w-[180px] items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        'flex h-7 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        compact ? 'w-7 flex-shrink-0 px-0' : 'max-w-[180px]',
         active
           ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
           : tone === 'warning'
@@ -1081,7 +1200,7 @@ function ComposerControlButton({
       title={title}
     >
       <span className="flex-shrink-0">{icon}</span>
-      <span className="truncate">{label}</span>
+      {!compact && <span className="truncate">{label}</span>}
     </button>
   );
 }
@@ -1240,7 +1359,7 @@ function localizeFallbackSlashCommands(
 }
 
 function mergeSlashCommands(commands: SlashCommandInfo[], fallbackCommands: SlashCommandInfo[]): SlashCommandInfo[] {
-  const merged = [...commands, ...fallbackCommands];
+  const merged = [...fallbackCommands, ...commands];
   const seen = new Set<string>();
   const result: SlashCommandInfo[] = [];
 
@@ -1299,6 +1418,7 @@ function messageTextLength(message: ChatMessage): number {
   const contentChars = message.content.reduce((total, part) => {
     if (part.type === 'text') return total + (part.text?.length ?? 0);
     if (part.type === 'thinking') return total + (part.thinking?.content.length ?? 0);
+    if (part.type === 'image') return total + Math.ceil((part.image?.data.length ?? 0) * 0.75);
     if (part.type === 'tool_use') return total + JSON.stringify(part.toolUse?.args ?? {}).length;
     if (part.type === 'tool_result') return total + (part.toolResult?.content.length ?? 0);
     return total;

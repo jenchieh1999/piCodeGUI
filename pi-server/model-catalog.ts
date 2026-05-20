@@ -1,4 +1,5 @@
 import type { ModelData, ProviderData } from './types.js';
+import { getAuthPath, getModelsPath } from './agent-paths.js';
 
 type SdkModel = {
   id?: unknown;
@@ -17,8 +18,8 @@ type SdkModel = {
 
 export async function getAvailableSdkProviders(): Promise<ProviderData[]> {
   const { AuthStorage, ModelRegistry } = await import('@earendil-works/pi-coding-agent');
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
+  const authStorage = AuthStorage.create(getAuthPath());
+  const modelRegistry = ModelRegistry.create(authStorage, getModelsPath());
   await Promise.resolve(modelRegistry.refresh?.());
 
   const providers = new Map<string, ProviderData>();

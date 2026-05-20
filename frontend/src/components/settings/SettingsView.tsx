@@ -3,6 +3,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useModelStore } from '../../stores/modelStore';
 import { useExtensionStore } from '../../stores/extensionStore';
 import { useUIStore } from '../../stores/uiStore';
+import { useChatStore } from '../../stores/chatStore';
 import { piApi } from '../../api/client';
 import { ChannelsSettings } from './ChannelsSettings';
 import type {
@@ -79,6 +80,8 @@ export function SettingsView() {
   const currentModel = useModelStore((s) => s.currentModel);
   const thinkingLevel = useModelStore((s) => s.thinkingLevel);
   const availableModels = useModelStore((s) => s.availableModels);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === activeSessionId));
   const themes = useExtensionStore((s) => s.themes);
   const customThemes = useExtensionStore((s) => s.customThemes);
 
@@ -92,8 +95,9 @@ export function SettingsView() {
         return (
           <ModelSettings
             currentModel={currentModel}
-            thinkingLevel={thinkingLevel}
+            thinkingLevel={activeSession?.thinkingLevel ?? thinkingLevel}
             availableModels={availableModels}
+            activeSessionId={activeSessionId}
           />
         );
       case 'credentials':
@@ -880,11 +884,35 @@ interface ModelSettingsProps {
   currentModel: { id: string; name: string; provider: string } | null;
   thinkingLevel: ThinkingLevel;
   availableModels: Array<{ id: string; name: string; provider: string }>;
+  activeSessionId: string | null;
 }
 
-function ModelSettings({ currentModel, thinkingLevel, availableModels }: ModelSettingsProps) {
+function ModelSettings({ currentModel, thinkingLevel, availableModels, activeSessionId }: ModelSettingsProps) {
   const { t } = useI18n();
+  const addToast = useUIStore((s) => s.addToast);
+  const setGlobalThinkingLevel = useModelStore((s) => s.setThinkingLevel);
+  const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === activeSessionId));
+  const updateSession = useChatStore((s) => s.updateSession);
   const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  const scopeLabel = activeSession ? t('settings.model.thinkingSessionScope', { name: activeSession.title }) : t('settings.model.thinkingGlobalScope');
+
+  const selectThinkingLevel = (level: ThinkingLevel) => {
+    const sent = piApi.send({
+      type: 'set_thinking_level',
+      sessionId: activeSessionId ?? undefined,
+      level,
+    });
+    if (!sent) {
+      addToast({ type: 'error', message: t('chat.switchThinkingDisconnected') });
+      return;
+    }
+
+    if (activeSession) {
+      updateSession({ ...activeSession, thinkingLevel: level, updatedAt: Date.now() });
+    } else {
+      setGlobalThinkingLevel(level);
+    }
+  };
 
   return (
     <div className="max-w-md space-y-6">
@@ -901,11 +929,12 @@ function ModelSettings({ currentModel, thinkingLevel, availableModels }: ModelSe
       {/* Thinking Level */}
       <div>
         <label className="text-[10px] font-semibold text-pi-dim uppercase">{t('settings.model.thinkingLevel')}</label>
+        <div className="mt-1 text-[10px] text-pi-dim">{scopeLabel}</div>
         <div className="mt-1 flex gap-1">
           {thinkingLevels.map((level) => (
             <button
               key={level}
-              onClick={() => piApi.send({ type: 'set_thinking_level', level })}
+              onClick={() => selectThinkingLevel(level)}
               className={cn(
                 'px-2.5 py-1 rounded-md text-[10px] font-medium transition-colors',
                 thinkingLevel === level
@@ -953,6 +982,7 @@ function CredentialsSettings() {
   const addToast = useUIStore((s) => s.addToast);
   const [status, setStatus] = useState<AuthStatusResult | null>(null);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<CredentialFilter>('all');
   const [loading, setLoading] = useState(false);
@@ -961,11 +991,16 @@ function CredentialsSettings() {
   const [testResults, setTestResults] = useState<Record<string, AuthProviderTestResult>>({});
   const [error, setError] = useState<string | null>(null);
 
+  const applyAuthStatus = useCallback((next: AuthStatusResult) => {
+    setStatus(next);
+    setBaseUrls(Object.fromEntries(next.providers.map((provider) => [provider.id, provider.baseUrl ?? ''])));
+  }, []);
+
   const loadStatus = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setStatus(await piApi.getAuthStatus());
+      applyAuthStatus(await piApi.getAuthStatus());
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -973,7 +1008,7 @@ function CredentialsSettings() {
     } finally {
       setLoading(false);
     }
-  }, [addToast, t]);
+  }, [addToast, applyAuthStatus, t]);
 
   useEffect(() => {
     void loadStatus();
@@ -986,7 +1021,7 @@ function CredentialsSettings() {
         if (filter === 'configured' && !provider.configured) return false;
         if (filter === 'available' && provider.availableModels === 0) return false;
         if (!query) return true;
-        return `${provider.name} ${provider.id} ${provider.label ?? ''}`.toLowerCase().includes(query);
+        return `${provider.name} ${provider.id} ${provider.label ?? ''} ${provider.baseUrl ?? ''}`.toLowerCase().includes(query);
       })
       .sort((a, b) => {
         const configuredDelta = Number(b.configured) - Number(a.configured);
@@ -999,6 +1034,7 @@ function CredentialsSettings() {
 
   const configuredCount = status?.providers.filter((provider) => provider.configured).length ?? 0;
   const availableCount = status?.providers.filter((provider) => provider.availableModels > 0).length ?? 0;
+  const proxyCount = status?.providers.filter((provider) => provider.baseUrl).length ?? 0;
 
   const saveApiKey = async (provider: AuthProviderStatus) => {
     const apiKey = apiKeys[provider.id]?.trim() ?? '';
@@ -1010,7 +1046,7 @@ function CredentialsSettings() {
     setBusyProvider(provider.id);
     try {
       const next = await piApi.saveProviderApiKey(provider.id, apiKey);
-      setStatus(next);
+      applyAuthStatus(next);
       setApiKeys((current) => ({ ...current, [provider.id]: '' }));
       piApi.send({ type: 'auth_refresh' });
       addToast({ type: 'success', message: t('settings.credentials.saved', { provider: provider.name }) });
@@ -1025,13 +1061,47 @@ function CredentialsSettings() {
   const removeApiKey = async (provider: AuthProviderStatus) => {
     setBusyProvider(provider.id);
     try {
-      setStatus(await piApi.removeProviderApiKey(provider.id));
+      applyAuthStatus(await piApi.removeProviderApiKey(provider.id));
       setApiKeys((current) => ({ ...current, [provider.id]: '' }));
       piApi.send({ type: 'auth_refresh' });
       addToast({ type: 'success', message: t('settings.credentials.removed', { provider: provider.name }) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       addToast({ type: 'error', message: t('settings.credentials.removeFailed', { provider: provider.name, message }) });
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const saveProviderEndpoint = async (provider: AuthProviderStatus) => {
+    const baseUrl = baseUrls[provider.id]?.trim() ?? '';
+    setBusyProvider(`config:${provider.id}`);
+    try {
+      applyAuthStatus(await piApi.saveProviderConfig(provider.id, baseUrl));
+      piApi.send({ type: 'auth_refresh' });
+      addToast({
+        type: 'success',
+        message: baseUrl
+          ? t('settings.credentials.endpointSaved', { provider: provider.name })
+          : t('settings.credentials.endpointCleared', { provider: provider.name }),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addToast({ type: 'error', message: t('settings.credentials.endpointFailed', { provider: provider.name, message }) });
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const clearProviderEndpoint = async (provider: AuthProviderStatus) => {
+    setBusyProvider(`config:${provider.id}`);
+    try {
+      applyAuthStatus(await piApi.removeProviderConfig(provider.id));
+      piApi.send({ type: 'auth_refresh' });
+      addToast({ type: 'success', message: t('settings.credentials.endpointCleared', { provider: provider.name }) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addToast({ type: 'error', message: t('settings.credentials.endpointFailed', { provider: provider.name, message }) });
     } finally {
       setBusyProvider(null);
     }
@@ -1064,6 +1134,8 @@ function CredentialsSettings() {
             <span>{t('settings.credentials.configured', { count: configuredCount })}</span>
             <span className="h-1 w-1 rounded-full bg-pi-border" />
             <span>{t('settings.credentials.available', { count: availableCount })}</span>
+            <span className="h-1 w-1 rounded-full bg-pi-border" />
+            <span>{t('settings.credentials.proxies', { count: proxyCount })}</span>
             {loading && <span>{t('settings.credentials.refreshing')}</span>}
           </div>
         </div>
@@ -1108,18 +1180,29 @@ function CredentialsSettings() {
         </div>
       )}
 
+      {status?.modelsJsonError && (
+        <div className="rounded-md border border-pi-warning/30 bg-pi-warning/10 px-3 py-2 text-xs text-pi-warning">
+          {t('settings.credentials.modelsJsonError', { message: status.modelsJsonError })}
+        </div>
+      )}
+
       <div className="space-y-2">
         {providers.map((provider) => (
           <ProviderCredentialRow
             key={provider.id}
             provider={provider}
             apiKey={apiKeys[provider.id] ?? ''}
+            baseUrl={baseUrls[provider.id] ?? ''}
             busy={busyProvider === provider.id}
+            endpointBusy={busyProvider === `config:${provider.id}`}
             testing={testingProvider === provider.id}
             testResult={testResults[provider.id]}
             onApiKeyChange={(apiKey) => setApiKeys((current) => ({ ...current, [provider.id]: apiKey }))}
+            onBaseUrlChange={(baseUrl) => setBaseUrls((current) => ({ ...current, [provider.id]: baseUrl }))}
             onSave={() => void saveApiKey(provider)}
             onRemove={() => void removeApiKey(provider)}
+            onSaveEndpoint={() => void saveProviderEndpoint(provider)}
+            onClearEndpoint={() => void clearProviderEndpoint(provider)}
             onTest={() => void testProvider(provider)}
           />
         ))}
@@ -1144,27 +1227,38 @@ function CredentialsSettings() {
 interface ProviderCredentialRowProps {
   provider: AuthProviderStatus;
   apiKey: string;
+  baseUrl: string;
   busy: boolean;
+  endpointBusy: boolean;
   testing: boolean;
   testResult?: AuthProviderTestResult;
   onApiKeyChange: (apiKey: string) => void;
+  onBaseUrlChange: (baseUrl: string) => void;
   onSave: () => void;
   onRemove: () => void;
+  onSaveEndpoint: () => void;
+  onClearEndpoint: () => void;
   onTest: () => void;
 }
 
 function ProviderCredentialRow({
   provider,
   apiKey,
+  baseUrl,
   busy,
+  endpointBusy,
   testing,
   testResult,
   onApiKeyChange,
+  onBaseUrlChange,
   onSave,
   onRemove,
+  onSaveEndpoint,
+  onClearEndpoint,
   onTest,
 }: ProviderCredentialRowProps) {
   const { t } = useI18n();
+  const endpointChanged = baseUrl.trim() !== (provider.baseUrl ?? '');
 
   return (
     <div className="rounded-lg border border-pi-border bg-pi-bg-secondary p-3">
@@ -1175,11 +1269,17 @@ function ProviderCredentialRow({
             <span className="rounded px-1.5 py-0.5 text-[9px] font-mono bg-pi-bg-tertiary text-pi-dim">
               {provider.id}
             </span>
+            {provider.baseUrl && (
+              <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-pi-accent/10 text-pi-accent">
+                {t('settings.credentials.proxyBadge')}
+              </span>
+            )}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-pi-dim">
             <span>{t('settings.credentials.models', { available: provider.availableModels, total: provider.models })}</span>
             {provider.source && <span>{provider.source}</span>}
             {provider.label && <span>{provider.label}</span>}
+            {provider.baseUrl && <span className="max-w-[260px] truncate font-mono">{provider.baseUrl}</span>}
           </div>
         </div>
         <div
@@ -1192,6 +1292,48 @@ function ProviderCredentialRow({
         >
           {provider.configured ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
           {provider.configured ? t('settings.credentials.configuredBadge') : t('settings.credentials.missingBadge')}
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-md border border-pi-border/70 bg-pi-bg-tertiary/60 p-2.5">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-pi-muted">
+              {t('settings.credentials.baseUrl')}
+            </div>
+            <div className="mt-0.5 text-[10px] text-pi-dim">
+              {t('settings.credentials.endpointHint')}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            value={baseUrl}
+            onChange={(event) => onBaseUrlChange(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') onSaveEndpoint();
+            }}
+            placeholder={t('settings.credentials.baseUrlPlaceholder')}
+            disabled={endpointBusy}
+            className="h-8 min-w-0 flex-1 rounded-md bg-pi-bg border border-pi-border px-3 font-mono text-[11px] text-pi-text placeholder:text-pi-dim disabled:opacity-50"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={onSaveEndpoint}
+              disabled={endpointBusy || !endpointChanged}
+              className="h-8 px-3 rounded-md border border-pi-border text-xs text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover disabled:opacity-50 transition-colors flex items-center gap-1.5"
+            >
+              {endpointBusy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              {t('settings.credentials.endpointApply')}
+            </button>
+            <button
+              onClick={onClearEndpoint}
+              disabled={endpointBusy || !provider.baseUrl}
+              className="h-8 px-3 rounded-md border border-pi-border text-xs text-pi-muted hover:text-pi-error hover:border-pi-error/40 disabled:opacity-50 disabled:hover:text-pi-muted disabled:hover:border-pi-border transition-colors"
+            >
+              {t('settings.credentials.endpointClear')}
+            </button>
+          </div>
         </div>
       </div>
 

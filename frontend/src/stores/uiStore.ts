@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import type { RightPanelType, SlashCommandInfo, ViewType } from '../types';
 
+export interface WorkspaceOpenRequest {
+  id: number;
+  sessionId: string;
+  path: string;
+}
+
 interface UIState {
   // View
   activeView: ViewType;
@@ -15,9 +21,18 @@ interface UIState {
   // Right panel
   rightPanelType: RightPanelType;
   rightPanelWidth: number;
+  workspaceOpenRequest: WorkspaceOpenRequest | null;
   setRightPanel: (type: RightPanelType) => void;
   toggleRightPanel: (type: RightPanelType) => void;
   setRightPanelWidth: (w: number) => void;
+  requestWorkspaceOpen: (sessionId: string, path: string) => void;
+
+  // Docked terminal under the chat composer
+  terminalDockOpen: boolean;
+  terminalDockHeight: number;
+  setTerminalDockOpen: (open: boolean) => void;
+  toggleTerminalDock: () => void;
+  setTerminalDockHeight: (height: number) => void;
   
   // Toast
   toasts: Toast[];
@@ -41,9 +56,13 @@ export interface Toast {
 }
 
 let toastId = 0;
+let workspaceOpenRequestId = 0;
 
 const clampPanelWidth = (width: number, min: number, max: number) =>
   Math.min(Math.max(Math.round(width), min), max);
+
+const clampTerminalDockHeight = (height: number) =>
+  Math.min(Math.max(Math.round(height), 140), 520);
 
 export const useUIStore = create<UIState>((set) => ({
   activeView: 'chat',
@@ -56,10 +75,22 @@ export const useUIStore = create<UIState>((set) => ({
   
   rightPanelType: null,
   rightPanelWidth: 380,
+  workspaceOpenRequest: null,
   setRightPanel: (type) => set({ rightPanelType: type }),
   toggleRightPanel: (type) =>
     set((s) => ({ rightPanelType: s.rightPanelType === type ? null : type })),
   setRightPanelWidth: (w) => set({ rightPanelWidth: clampPanelWidth(w, 300, 760) }),
+  requestWorkspaceOpen: (sessionId, path) =>
+    set({
+      rightPanelType: 'files',
+      workspaceOpenRequest: { id: ++workspaceOpenRequestId, sessionId, path },
+    }),
+
+  terminalDockOpen: false,
+  terminalDockHeight: 260,
+  setTerminalDockOpen: (open) => set({ terminalDockOpen: open }),
+  toggleTerminalDock: () => set((s) => ({ terminalDockOpen: !s.terminalDockOpen })),
+  setTerminalDockHeight: (height) => set({ terminalDockHeight: clampTerminalDockHeight(height) }),
   
   toasts: [],
   addToast: (toast) => {

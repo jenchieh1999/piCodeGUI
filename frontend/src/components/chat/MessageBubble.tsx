@@ -125,6 +125,31 @@ export function MessageBubble({ message, showThinking }: MessageBubbleProps) {
               );
             }
 
+            if (block.type === 'image' && block.image) {
+              const image = block.image;
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => openImagePreview(image)}
+                  className="group/image block max-w-full cursor-zoom-in overflow-hidden rounded-lg border border-pi-border bg-pi-bg-tertiary/70 text-left shadow-sm transition-colors hover:border-pi-accent/60"
+                  title={image.fileName ?? image.mimeType}
+                >
+                  <img
+                    src={imageDataUrl(image)}
+                    alt={image.fileName ?? 'image attachment'}
+                    className="max-h-[360px] max-w-full object-contain"
+                    loading="lazy"
+                  />
+                  {(image.fileName || image.mimeType) && (
+                    <div className="border-t border-pi-border/70 px-2 py-1 text-[10px] text-pi-dim">
+                      <span className="line-clamp-1">{image.fileName ?? image.mimeType}</span>
+                    </div>
+                  )}
+                </button>
+              );
+            }
+
             if (block.type === 'tool_use' && block.toolUse) {
               const toolState = message.toolCalls?.find((tool) => tool.id === block.toolUse?.id);
               return (
@@ -195,4 +220,13 @@ export function MessageBubble({ message, showThinking }: MessageBubbleProps) {
       </div>
     </div>
   );
+}
+
+function imageDataUrl(image: { data: string; mimeType: string }): string {
+  if (image.data.startsWith('data:')) return image.data;
+  return `data:${image.mimeType};base64,${image.data}`;
+}
+
+function openImagePreview(image: { data: string; mimeType: string }): void {
+  window.open(imageDataUrl(image), '_blank', 'noopener,noreferrer');
 }
