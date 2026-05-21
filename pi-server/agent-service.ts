@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
+import { createAgentLearning, listAgentLearnings, type AgentLearningInput } from './agent-learning-service.js';
 import { getDataDir } from './persistence.js';
-import type { AgentConfigData } from './types.js';
+import type { AgentConfigData, AgentRoleData, AgentSelfImprovementConfigData, AgentSubAgentConfigData } from './types.js';
 
 interface AgentStore {
   agents: AgentConfigData[];
@@ -13,6 +14,10 @@ interface AgentUpsertInput {
   description?: string;
   systemPrompt?: string;
   enabled?: boolean;
+  role?: AgentRoleData;
+  parentAgentId?: string;
+  subAgent?: Partial<AgentSubAgentConfigData>;
+  selfImprovement?: Partial<AgentSelfImprovementConfigData>;
   modelProvider?: string;
   modelId?: string;
   projectPath?: string;
@@ -44,6 +49,15 @@ export async function handleAgentRequest(req: IncomingMessage): Promise<AgentHtt
     if (parts.length === 2 && req.method === 'POST') {
       const input = await readJsonBody<AgentUpsertInput>(req);
       return json(201, { agent: createAgent(input) });
+    }
+
+    if (parts.length === 3 && parts[2] === 'learnings' && req.method === 'GET') {
+      return json(200, { learnings: listAgentLearnings(url.searchParams.get('projectPath') ?? undefined) });
+    }
+
+    if (parts.length === 3 && parts[2] === 'learnings' && req.method === 'POST') {
+      const input = await readJsonBody<AgentLearningInput>(req);
+      return json(201, { learning: createAgentLearning(input) });
     }
 
     if (parts.length === 3 && req.method === 'PATCH') {
@@ -79,6 +93,10 @@ function createAgent(input: AgentUpsertInput): AgentConfigData {
     description: normalizeString(input.description) || 'Custom routing and persona for Pi Agent.',
     systemPrompt: normalizeString(input.systemPrompt) || '',
     enabled: input.enabled !== false,
+    role: normalizeRole(input.role),
+    parentAgentId: normalizeString(input.parentAgentId),
+    subAgent: normalizeSubAgentConfig(input.subAgent),
+    selfImprovement: normalizeSelfImprovementConfig(input.selfImprovement),
     modelProvider: normalizeString(input.modelProvider),
     modelId: normalizeString(input.modelId),
     projectPath: normalizeString(input.projectPath),
@@ -103,6 +121,12 @@ function updateAgent(id: string, input: AgentUpsertInput): AgentConfigData | nul
       description: input.description !== undefined ? normalizeString(input.description) || '' : agent.description,
       systemPrompt: input.systemPrompt !== undefined ? normalizeString(input.systemPrompt) || '' : agent.systemPrompt,
       enabled: input.enabled !== undefined ? Boolean(input.enabled) : agent.enabled,
+      role: input.role !== undefined ? normalizeRole(input.role) : agent.role,
+      parentAgentId: input.parentAgentId !== undefined ? normalizeString(input.parentAgentId) : agent.parentAgentId,
+      subAgent: input.subAgent !== undefined ? normalizeSubAgentConfig(input.subAgent, agent.subAgent) : agent.subAgent,
+      selfImprovement: input.selfImprovement !== undefined
+        ? normalizeSelfImprovementConfig(input.selfImprovement, agent.selfImprovement)
+        : agent.selfImprovement,
       modelProvider: input.modelProvider !== undefined ? normalizeString(input.modelProvider) : agent.modelProvider,
       modelId: input.modelId !== undefined ? normalizeString(input.modelId) : agent.modelId,
       projectPath: input.projectPath !== undefined ? normalizeString(input.projectPath) : agent.projectPath,
@@ -177,6 +201,10 @@ function normalizeStoredAgent(raw: unknown): AgentConfigData | null {
     description: normalizeString(record.description) || 'Custom routing and persona for Pi Agent.',
     systemPrompt: normalizeString(record.systemPrompt) || '',
     enabled: record.enabled !== false,
+    role: normalizeRole(record.role),
+    parentAgentId: normalizeString(record.parentAgentId),
+    subAgent: normalizeSubAgentConfig(record.subAgent),
+    selfImprovement: normalizeSelfImprovementConfig(record.selfImprovement),
     modelProvider: normalizeString(record.modelProvider),
     modelId: normalizeString(record.modelId),
     projectPath: normalizeString(record.projectPath),
@@ -189,6 +217,91 @@ function normalizeStoredAgent(raw: unknown): AgentConfigData | null {
 function normalizeChannelIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return Array.from(new Set(value.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item))));
+}
+
+function normalizeRole(value: unknown): AgentRoleData {
+  const role = normalizeString(value);
+  switch (role) {
+    case 'main':
+    case 'subagent':
+    case 'planner':
+    case 'implementer':
+    case 'reviewer':
+    case 'tester':
+    case 'documenter':
+    case 'researcher':
+    case 'custom':
+      return role;
+    default:
+      return 'custom';
+  }
+}
+
+function normalizeSubAgentConfig(
+  value: unknown,
+  fallback?: AgentSubAgentConfigData,
+): AgentSubAgentConfigData {
+  const record = value && typeof value === 'object'
+    ? value as Partial<AgentSubAgentConfigData>
+    : {};
+  const base = fallback ?? defaultSubAgentConfig();
+  return {
+    enabled: record.enabled !== undefined ? Boolean(record.enabled) : base.enabled,
+    autoDelegate: record.autoDelegate !== undefined ? Boolean(record.autoDelegate) : base.autoDelegate,
+    triggers: normalizeStringList(record.triggers, base.triggers),
+    maxParallel: clampNumber(record.maxParallel, 1, 8, base.maxParallel),
+    reviewRequired: record.reviewRequired !== undefined ? Boolean(record.reviewRequired) : base.reviewRequired,
+    outputContract: normalizeString(record.outputContract) ?? base.outputContract,
+  };
+}
+
+function defaultSubAgentConfig(): AgentSubAgentConfigData {
+  return {
+    enabled: false,
+    autoDelegate: true,
+    triggers: ['complex task', 'implementation', 'debug', 'review', 'test'],
+    maxParallel: 3,
+    reviewRequired: true,
+    outputContract: 'Return concise findings, changed files, risks, and verification steps.',
+  };
+}
+
+function normalizeSelfImprovementConfig(
+  value: unknown,
+  fallback?: AgentSelfImprovementConfigData,
+): AgentSelfImprovementConfigData {
+  const record = value && typeof value === 'object'
+    ? value as Partial<AgentSelfImprovementConfigData>
+    : {};
+  const base = fallback ?? defaultSelfImprovementConfig();
+  return {
+    enabled: record.enabled !== undefined ? Boolean(record.enabled) : base.enabled,
+    captureCorrections: record.captureCorrections !== undefined ? Boolean(record.captureCorrections) : base.captureCorrections,
+    captureFailures: record.captureFailures !== undefined ? Boolean(record.captureFailures) : base.captureFailures,
+    projectMemory: record.projectMemory !== undefined ? Boolean(record.projectMemory) : base.projectMemory,
+    includeRecentLearnings: record.includeRecentLearnings !== undefined ? Boolean(record.includeRecentLearnings) : base.includeRecentLearnings,
+  };
+}
+
+function defaultSelfImprovementConfig(): AgentSelfImprovementConfigData {
+  return {
+    enabled: true,
+    captureCorrections: true,
+    captureFailures: true,
+    projectMemory: true,
+    includeRecentLearnings: true,
+  };
+}
+
+function normalizeStringList(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const next = Array.from(new Set(value.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item))));
+  return next.length > 0 ? next : fallback;
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function normalizeString(value: unknown): string | undefined {

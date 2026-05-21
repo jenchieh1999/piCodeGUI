@@ -3,15 +3,56 @@ import type { AppSettings, PiTheme } from '../types';
 type ThemeColors = Record<string, string>;
 
 const DEFAULT_FONT_FAMILY = "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-const DEFAULT_MONO_FONT_FAMILY = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace";
+const DEFAULT_MONO_FONT_FAMILY = "'SF Mono', 'SFMono-Regular', ui-monospace, 'Cascadia Code', 'Cascadia Mono', Menlo, Monaco, Consolas, monospace";
+export const DEFAULT_THEME_NAME = 'palette-nocturne';
 
-const PRIORITY_THEME_NAMES = ['dark', 'light', 'claude-code', 'codex', 'trae'];
+export type ThemeSeries = 'dark' | 'light';
+
+const DARK_THEME_NAMES = [
+  'palette-nocturne',
+  'dark',
+  'graphite',
+  'midnight-blue',
+  'calm-slate',
+  'forest-canopy',
+  'ocean-depths',
+  'violet-arc',
+  'rose-quartz',
+  'amber-workbench',
+  'solarized-dark',
+  'nord-frost',
+  'dracula-night',
+  'catppuccin-mocha',
+  'crimson-lab',
+  'cyberpunk',
+  'cyberpunk-neon',
+  'star-wars-galaxy',
+  'claude-code',
+  'codex',
+  'trae',
+  'terminal-green',
+  'coffeehouse',
+  'high-contrast-dark',
+];
+
+const LIGHT_THEME_NAMES = [
+  'light',
+  'iceberg',
+  'matcha-latte',
+  'lavender-mist',
+  'sepia-paper',
+  'solarized-light',
+  'high-contrast-light',
+];
+
+const PRIORITY_THEME_NAMES = [...DARK_THEME_NAMES, ...LIGHT_THEME_NAMES];
 
 const THEME_DISPLAY_NAMES: Record<string, string> = {
   dark: 'Dark',
   light: 'Light',
   'midnight-blue': 'Midnight Blue',
   'forest-canopy': 'Forest Canopy',
+  'palette-nocturne': 'Palette Nocturne',
   'rose-quartz': 'Rose Quartz',
   'amber-workbench': 'Amber Workbench',
   'violet-arc': 'Violet Arc',
@@ -44,131 +85,131 @@ export const BUILTIN_THEMES: PiTheme[] = [
   {
     name: 'dark',
     colors: {
-      accent: '#00aaff',
-      border: '#3a3a3e',
-      borderAccent: '#00aaff',
-      borderMuted: '#2a2a2e',
-      success: '#00cc66',
-      error: '#ff4444',
-      warning: '#ffaa00',
-      muted: '#888892',
-      dim: '#55555a',
-      text: '#e0e0e8',
-      thinkingText: '#a0a0b0',
-      bg: '#1a1a1e',
-      bgSecondary: '#1e1e24',
-      bgTertiary: '#24242a',
-      bgHover: '#2a2a32',
-      titlebarBg: '#151519',
-      titlebarText: '#e0e0e8',
-      titlebarBorder: '#2a2a2e',
-      titlebarHover: '#24242a',
-      titlebarActive: '#2d2d38',
-      selectedBg: '#2d2d38',
-      userMessageBg: '#2d2d38',
-      userMessageText: '#e0e0e8',
-      customMessageBg: '#2d2d38',
-      customMessageText: '#e0e0e8',
-      customMessageLabel: '#00aaff',
-      toolPendingBg: '#1e1e2e',
-      toolSuccessBg: '#1e2e1e',
-      toolErrorBg: '#2e1e1e',
-      toolTitle: '#00aaff',
-      toolOutput: '#c0c0d0',
-      mdHeading: '#ffaa00',
-      mdLink: '#00aaff',
-      mdLinkUrl: '#888892',
-      mdCode: '#00ffff',
-      mdCodeBlock: '#e0e0e8',
-      mdCodeBlockBorder: '#3a3a3e',
-      mdQuote: '#888892',
-      mdQuoteBorder: '#3a3a3e',
-      mdHr: '#3a3a3e',
-      mdListBullet: '#00ffff',
-      toolDiffAdded: '#00cc66',
-      toolDiffRemoved: '#ff4444',
-      toolDiffContext: '#888892',
-      syntaxComment: '#888892',
-      syntaxKeyword: '#00aaff',
-      syntaxFunction: '#00ccff',
-      syntaxVariable: '#ffaa00',
-      syntaxString: '#00cc66',
-      syntaxNumber: '#ff66cc',
-      syntaxType: '#00ccff',
-      syntaxOperator: '#00aaff',
-      syntaxPunctuation: '#888892',
-      thinkingOff: '#55555a',
-      thinkingMinimal: '#00aaff',
-      thinkingLow: '#00ccff',
-      thinkingMedium: '#00ffff',
-      thinkingHigh: '#ff66cc',
-      thinkingXhigh: '#ff4444',
-      bashMode: '#ffaa00',
+      accent: '#5ac8fa',
+      border: '#343b49',
+      borderAccent: '#5ac8fa',
+      borderMuted: '#242a34',
+      success: '#63d48a',
+      error: '#ff6b72',
+      warning: '#f6c177',
+      muted: '#a7b0c0',
+      dim: '#6e7786',
+      text: '#edf0f7',
+      thinkingText: '#bac3d4',
+      bg: '#111318',
+      bgSecondary: '#171a21',
+      bgTertiary: '#20242d',
+      bgHover: '#2a303b',
+      titlebarBg: '#0d0f13',
+      titlebarText: '#edf0f7',
+      titlebarBorder: '#242a34',
+      titlebarHover: '#20242d',
+      titlebarActive: '#263241',
+      selectedBg: '#263241',
+      userMessageBg: '#1f2a38',
+      userMessageText: '#f4f7fb',
+      customMessageBg: '#1c2430',
+      customMessageText: '#f4f7fb',
+      customMessageLabel: '#5ac8fa',
+      toolPendingBg: '#1c2230',
+      toolSuccessBg: '#14271d',
+      toolErrorBg: '#2b171c',
+      toolTitle: '#7dcfff',
+      toolOutput: '#d8deea',
+      mdHeading: '#f6c177',
+      mdLink: '#7dcfff',
+      mdLinkUrl: '#9da7b8',
+      mdCode: '#9adbd5',
+      mdCodeBlock: '#f1f4f8',
+      mdCodeBlockBorder: '#3c4657',
+      mdQuote: '#bac3d4',
+      mdQuoteBorder: '#4d8fd6',
+      mdHr: '#343b49',
+      mdListBullet: '#9adbd5',
+      toolDiffAdded: '#63d48a',
+      toolDiffRemoved: '#ff6b72',
+      toolDiffContext: '#9da7b8',
+      syntaxComment: '#8792a2',
+      syntaxKeyword: '#7dcfff',
+      syntaxFunction: '#9adbd5',
+      syntaxVariable: '#f6c177',
+      syntaxString: '#63d48a',
+      syntaxNumber: '#f5a6d6',
+      syntaxType: '#b7b9ff',
+      syntaxOperator: '#7dcfff',
+      syntaxPunctuation: '#bac3d4',
+      thinkingOff: '#6e7786',
+      thinkingMinimal: '#5ac8fa',
+      thinkingLow: '#7dcfff',
+      thinkingMedium: '#9adbd5',
+      thinkingHigh: '#f6c177',
+      thinkingXhigh: '#ff6b72',
+      bashMode: '#f6c177',
     },
   },
   {
     name: 'light',
     colors: {
-      accent: '#0066cc',
-      border: '#d4d4d8',
-      borderAccent: '#0066cc',
-      borderMuted: '#e4e4e7',
-      success: '#008a3a',
-      error: '#cc0000',
-      warning: '#b66d00',
-      muted: '#71717a',
-      dim: '#a1a1aa',
-      text: '#18181b',
-      thinkingText: '#52525b',
-      bg: '#fafafa',
+      accent: '#006edb',
+      border: '#d6dce6',
+      borderAccent: '#006edb',
+      borderMuted: '#e5e9f0',
+      success: '#1f8f55',
+      error: '#c8404a',
+      warning: '#9b6400',
+      muted: '#5f6673',
+      dim: '#8d95a3',
+      text: '#1d1d1f',
+      thinkingText: '#4f5968',
+      bg: '#f7f8fa',
       bgSecondary: '#ffffff',
-      bgTertiary: '#f4f4f5',
-      bgHover: '#e4e4e7',
-      titlebarBg: '#f4f4f5',
-      titlebarText: '#18181b',
-      titlebarBorder: '#d4d4d8',
-      titlebarHover: '#e4e4e7',
-      titlebarActive: '#dfe7f3',
-      selectedBg: '#e4e4e7',
-      userMessageBg: '#f4f4f5',
-      userMessageText: '#18181b',
-      customMessageBg: '#f4f4f5',
-      customMessageText: '#18181b',
-      customMessageLabel: '#0066cc',
-      toolPendingBg: '#eef2ff',
-      toolSuccessBg: '#ecfdf3',
-      toolErrorBg: '#fef2f2',
-      toolTitle: '#0066cc',
-      toolOutput: '#3f3f46',
-      mdHeading: '#9a5a00',
-      mdLink: '#0066cc',
-      mdLinkUrl: '#71717a',
-      mdCode: '#007c7c',
-      mdCodeBlock: '#18181b',
-      mdCodeBlockBorder: '#d4d4d8',
-      mdQuote: '#71717a',
-      mdQuoteBorder: '#d4d4d8',
-      mdHr: '#d4d4d8',
-      mdListBullet: '#007c7c',
-      toolDiffAdded: '#008a3a',
-      toolDiffRemoved: '#cc0000',
-      toolDiffContext: '#71717a',
-      syntaxComment: '#71717a',
-      syntaxKeyword: '#0066cc',
-      syntaxFunction: '#0088cc',
-      syntaxVariable: '#9a5a00',
-      syntaxString: '#008a3a',
-      syntaxNumber: '#b83280',
-      syntaxType: '#0088cc',
-      syntaxOperator: '#0066cc',
-      syntaxPunctuation: '#71717a',
-      thinkingOff: '#a1a1aa',
-      thinkingMinimal: '#0066cc',
-      thinkingLow: '#0088cc',
-      thinkingMedium: '#007c7c',
-      thinkingHigh: '#b83280',
-      thinkingXhigh: '#cc0000',
-      bashMode: '#9a5a00',
+      bgTertiary: '#eef1f5',
+      bgHover: '#e5e9f0',
+      titlebarBg: '#f3f5f8',
+      titlebarText: '#1d1d1f',
+      titlebarBorder: '#d6dce6',
+      titlebarHover: '#e8edf4',
+      titlebarActive: '#dcecff',
+      selectedBg: '#dcecff',
+      userMessageBg: '#edf5ff',
+      userMessageText: '#1d1d1f',
+      customMessageBg: '#f2f6fb',
+      customMessageText: '#1d1d1f',
+      customMessageLabel: '#006edb',
+      toolPendingBg: '#f1f5fb',
+      toolSuccessBg: '#edf9f1',
+      toolErrorBg: '#fff0f2',
+      toolTitle: '#006edb',
+      toolOutput: '#2d3340',
+      mdHeading: '#875a00',
+      mdLink: '#006edb',
+      mdLinkUrl: '#6f7784',
+      mdCode: '#006d73',
+      mdCodeBlock: '#1d1d1f',
+      mdCodeBlockBorder: '#cbd3df',
+      mdQuote: '#5f6673',
+      mdQuoteBorder: '#5a9ee8',
+      mdHr: '#d6dce6',
+      mdListBullet: '#006d73',
+      toolDiffAdded: '#1f8f55',
+      toolDiffRemoved: '#c8404a',
+      toolDiffContext: '#6f7784',
+      syntaxComment: '#6f7784',
+      syntaxKeyword: '#006edb',
+      syntaxFunction: '#007d8a',
+      syntaxVariable: '#875a00',
+      syntaxString: '#1f8f55',
+      syntaxNumber: '#a5367a',
+      syntaxType: '#5a55b3',
+      syntaxOperator: '#006edb',
+      syntaxPunctuation: '#5f6673',
+      thinkingOff: '#8d95a3',
+      thinkingMinimal: '#006edb',
+      thinkingLow: '#007d8a',
+      thinkingMedium: '#006d73',
+      thinkingHigh: '#9b6400',
+      thinkingXhigh: '#c8404a',
+      bashMode: '#875a00',
     },
   },
   themeVariant('midnight-blue', {
@@ -206,38 +247,90 @@ export const BUILTIN_THEMES: PiTheme[] = [
     error: '#ff7a7a',
     mdHeading: '#d7e879',
   }),
+  themeVariant('palette-nocturne', {
+    accent: '#8fd56b',
+    bg: '#0b1012',
+    bgSecondary: '#11181b',
+    bgTertiary: '#182226',
+    bgHover: '#223036',
+    border: '#32444b',
+    borderMuted: '#223138',
+    selectedBg: '#1e3a2c',
+    text: '#edf5f2',
+    thinkingText: '#b8c9c6',
+    muted: '#9fb3b1',
+    dim: '#708583',
+    warning: '#e6c36a',
+    success: '#8fd56b',
+    error: '#dd6a86',
+    titlebarBg: '#090d0f',
+    titlebarText: '#edf5f2',
+    titlebarBorder: '#223138',
+    titlebarHover: '#172126',
+    titlebarActive: '#1e3a2c',
+    userMessageBg: '#15251f',
+    userMessageText: '#edf5f2',
+    customMessageBg: '#201a2a',
+    customMessageText: '#edf5f2',
+    customMessageLabel: '#8fd56b',
+    toolPendingBg: '#151d21',
+    toolSuccessBg: '#14291a',
+    toolErrorBg: '#2b1720',
+    toolTitle: '#8fd56b',
+    toolOutput: '#d6e3e0',
+    mdHeading: '#e6c36a',
+    mdLink: '#73b7d8',
+    mdLinkUrl: '#9fb3b1',
+    mdCode: '#d79bdc',
+    mdListBullet: '#8fd56b',
+    syntaxKeyword: '#d79bdc',
+    syntaxFunction: '#8fd56b',
+    syntaxVariable: '#e6c36a',
+    syntaxString: '#9edc82',
+    syntaxNumber: '#e9a0b8',
+    syntaxType: '#b9d68b',
+    syntaxOperator: '#73b7d8',
+    syntaxPunctuation: '#9fb3b1',
+    thinkingMinimal: '#73b7d8',
+    thinkingLow: '#8fd56b',
+    thinkingMedium: '#e6c36a',
+    thinkingHigh: '#d79bdc',
+    thinkingXhigh: '#dd6a86',
+    bashMode: '#e6c36a',
+  }),
   themeVariant('rose-quartz', {
-    accent: '#ff7aa8',
-    bg: '#1b1017',
-    bgSecondary: '#25141e',
-    bgTertiary: '#341a2a',
-    bgHover: '#432238',
-    border: '#5a2d47',
-    borderMuted: '#3b2230',
-    selectedBg: '#4b2740',
-    text: '#fff0f6',
-    muted: '#c599ad',
-    dim: '#8f6376',
-    warning: '#ffc46b',
-    success: '#78d9a4',
-    error: '#ff5d73',
+    accent: '#e68aa5',
+    bg: '#1a1117',
+    bgSecondary: '#241820',
+    bgTertiary: '#30202b',
+    bgHover: '#402a38',
+    border: '#5a3b4d',
+    borderMuted: '#3b2733',
+    selectedBg: '#432b3a',
+    text: '#fff1f6',
+    muted: '#c6a0af',
+    dim: '#8d6d7a',
+    warning: '#e7bd74',
+    success: '#78d0a2',
+    error: '#ef6f82',
   }),
   themeVariant('amber-workbench', {
-    accent: '#ffb84d',
-    bg: '#17110a',
-    bgSecondary: '#21180f',
-    bgTertiary: '#302315',
-    bgHover: '#3f2f1e',
-    border: '#60482c',
-    borderMuted: '#3d2d1b',
-    selectedBg: '#4d351c',
-    text: '#fff4df',
-    muted: '#c4aa82',
-    dim: '#8a7556',
-    warning: '#ffd166',
-    success: '#8bd17c',
-    error: '#ff745f',
-    mdHeading: '#ffce73',
+    accent: '#e2b65f',
+    bg: '#17130d',
+    bgSecondary: '#211b13',
+    bgTertiary: '#302719',
+    bgHover: '#3f3423',
+    border: '#5b4930',
+    borderMuted: '#3b3021',
+    selectedBg: '#43351f',
+    text: '#fff2df',
+    muted: '#c2aa87',
+    dim: '#8a765a',
+    warning: '#eac56f',
+    success: '#8bc989',
+    error: '#ee7768',
+    mdHeading: '#eac56f',
+    mdLink: '#83b7d9',
   }),
   themeVariant('violet-arc', {
     accent: '#b794ff',
@@ -301,13 +394,13 @@ export const BUILTIN_THEMES: PiTheme[] = [
     dim: '#657b83',
     warning: '#b58900',
     success: '#859900',
-    error: '#dc322f',
-    mdHeading: '#cb4b16',
+    error: '#ff6b66',
+    mdHeading: '#d98a3f',
     syntaxString: '#2aa198',
-    syntaxNumber: '#d33682',
+    syntaxNumber: '#e57ab0',
   }),
   themeVariant('solarized-light', {
-    accent: '#268bd2',
+    accent: '#006fa6',
     bg: '#fdf6e3',
     bgSecondary: '#eee8d5',
     bgTertiary: '#e3dcc8',
@@ -318,11 +411,11 @@ export const BUILTIN_THEMES: PiTheme[] = [
     text: '#073642',
     muted: '#657b83',
     dim: '#93a1a1',
-    warning: '#b58900',
-    success: '#859900',
+    warning: '#8d6500',
+    success: '#557a00',
     error: '#dc322f',
     mdHeading: '#cb4b16',
-    syntaxString: '#2aa198',
+    syntaxString: '#007d70',
     syntaxNumber: '#d33682',
   }),
   themeVariant('nord-frost', {
@@ -339,7 +432,7 @@ export const BUILTIN_THEMES: PiTheme[] = [
     dim: '#9aa6b8',
     warning: '#ebcb8b',
     success: '#a3be8c',
-    error: '#bf616a',
+    error: '#e7828a',
     mdHeading: '#b48ead',
   }),
   themeVariant('dracula-night', {
@@ -378,7 +471,7 @@ export const BUILTIN_THEMES: PiTheme[] = [
     mdHeading: '#fab387',
   }),
   themeVariant('matcha-latte', {
-    accent: '#4f9f6f',
+    accent: '#2f7f5d',
     bg: '#f4f7ef',
     bgSecondary: '#ffffff',
     bgTertiary: '#e9efe1',
@@ -389,7 +482,7 @@ export const BUILTIN_THEMES: PiTheme[] = [
     text: '#203126',
     muted: '#647867',
     dim: '#8c9d8c',
-    warning: '#b7791f',
+    warning: '#8f5f17',
     success: '#2f855a',
     error: '#c53030',
   }),
@@ -410,40 +503,40 @@ export const BUILTIN_THEMES: PiTheme[] = [
     error: '#ff4d4f',
   }),
   themeVariant('cyberpunk', {
-    accent: '#00f5ff',
-    bg: '#10091f',
-    bgSecondary: '#180d2c',
-    bgTertiary: '#24133e',
-    bgHover: '#341a58',
-    border: '#5b2e82',
-    borderMuted: '#321c4a',
-    selectedBg: '#173d62',
+    accent: '#41dce8',
+    bg: '#100b1b',
+    bgSecondary: '#181224',
+    bgTertiary: '#231a33',
+    bgHover: '#302444',
+    border: '#4b3a62',
+    borderMuted: '#2f2442',
+    selectedBg: '#18344f',
     text: '#f9f7ff',
-    muted: '#bca8d9',
-    dim: '#7c6799',
-    warning: '#ffe45e',
-    success: '#39ff88',
-    error: '#ff3d9a',
-    mdHeading: '#ffe45e',
-    syntaxString: '#39ff88',
-    syntaxNumber: '#ff3d9a',
+    muted: '#b7a8cf',
+    dim: '#7b6a94',
+    warning: '#e7d66a',
+    success: '#62d88f',
+    error: '#ed5f9c',
+    mdHeading: '#e7d66a',
+    syntaxString: '#62d88f',
+    syntaxNumber: '#ed86bd',
   }),
   themeVariant('cyberpunk-neon', {
-    accent: '#00fff0',
-    bg: '#070012',
-    bgSecondary: '#0d061f',
-    bgTertiary: '#17102f',
-    bgHover: '#26154c',
-    border: '#6f2cff',
-    borderMuted: '#2d1759',
-    selectedBg: '#102d55',
+    accent: '#55e6dc',
+    bg: '#080412',
+    bgSecondary: '#10091d',
+    bgTertiary: '#1a1230',
+    bgHover: '#281b45',
+    border: '#5f3aa0',
+    borderMuted: '#2d1d52',
+    selectedBg: '#12304d',
     text: '#f8f4ff',
-    thinkingText: '#7dfcff',
-    muted: '#b592ff',
-    dim: '#7353a8',
-    warning: '#ffe600',
-    success: '#00ff85',
-    error: '#ff2d95',
+    thinkingText: '#a4f4ef',
+    muted: '#b9a6e8',
+    dim: '#7960a9',
+    warning: '#e1d657',
+    success: '#67e39a',
+    error: '#e85ca6',
     titlebarBg: '#05000d',
     titlebarHover: '#1b0f36',
     titlebarActive: '#271255',
@@ -452,17 +545,17 @@ export const BUILTIN_THEMES: PiTheme[] = [
     toolPendingBg: '#100d2d',
     toolSuccessBg: '#082d24',
     toolErrorBg: '#341026',
-    mdHeading: '#ffe600',
-    mdLink: '#00fff0',
-    mdCode: '#ff2d95',
-    syntaxKeyword: '#ff2d95',
-    syntaxFunction: '#00fff0',
-    syntaxVariable: '#ffe600',
-    syntaxString: '#00ff85',
-    syntaxNumber: '#ff7ad9',
-    syntaxType: '#b592ff',
-    thinkingHigh: '#ffe600',
-    thinkingXhigh: '#ff2d95',
+    mdHeading: '#e1d657',
+    mdLink: '#55e6dc',
+    mdCode: '#e85ca6',
+    syntaxKeyword: '#e85ca6',
+    syntaxFunction: '#55e6dc',
+    syntaxVariable: '#e1d657',
+    syntaxString: '#67e39a',
+    syntaxNumber: '#ed8fca',
+    syntaxType: '#b9a6e8',
+    thinkingHigh: '#e1d657',
+    thinkingXhigh: '#e85ca6',
   }),
   themeVariant('star-wars-galaxy', {
     accent: '#5bbcff',
@@ -558,7 +651,7 @@ export const BUILTIN_THEMES: PiTheme[] = [
     thinkingXhigh: '#d87058',
   }),
   themeVariant('codex', {
-    accent: '#6860a8',
+    accent: '#8d84d8',
     bg: '#101018',
     bgSecondary: '#181820',
     bgTertiary: '#202030',
@@ -670,20 +763,21 @@ export const BUILTIN_THEMES: PiTheme[] = [
     error: '#f7768e',
   }),
   themeVariant('sepia-paper', {
-    accent: '#9f6b2d',
-    bg: '#f5ead7',
-    bgSecondary: '#fff7e9',
-    bgTertiary: '#eadcc4',
-    bgHover: '#dfcfb3',
-    border: '#c8ad87',
-    borderMuted: '#e1d0b5',
-    selectedBg: '#ecd5ae',
-    text: '#2f2418',
-    muted: '#725f48',
-    dim: '#9b8568',
-    warning: '#a86f00',
-    success: '#547c38',
+    accent: '#2f76a8',
+    bg: '#f6efe2',
+    bgSecondary: '#fffaf0',
+    bgTertiary: '#eadfce',
+    bgHover: '#ded2bf',
+    border: '#c7b69d',
+    borderMuted: '#dfd2bf',
+    selectedBg: '#d9e4eb',
+    text: '#2e261c',
+    muted: '#705f4b',
+    dim: '#9a8870',
+    warning: '#9b6800',
+    success: '#4f7f46',
     error: '#b4443f',
+    mdLink: '#2f76a8',
   }),
   themeVariant('high-contrast-dark', {
     accent: '#00e5ff',
@@ -718,7 +812,7 @@ export const BUILTIN_THEMES: PiTheme[] = [
     error: '#b00020',
   }),
   themeVariant('lavender-mist', {
-    accent: '#8f6ee8',
+    accent: '#6f4fc6',
     bg: '#f6f1ff',
     bgSecondary: '#ffffff',
     bgTertiary: '#ece4fb',
@@ -734,37 +828,38 @@ export const BUILTIN_THEMES: PiTheme[] = [
     error: '#b33b5f',
   }),
   themeVariant('terminal-green', {
-    accent: '#33ff88',
-    bg: '#020604',
-    bgSecondary: '#07100b',
-    bgTertiary: '#0b1a11',
-    bgHover: '#102719',
-    border: '#1f5a36',
-    borderMuted: '#12351f',
-    selectedBg: '#164629',
-    text: '#dfffe9',
-    muted: '#8bcea2',
-    dim: '#578767',
-    warning: '#d7ff5f',
-    success: '#33ff88',
-    error: '#ff5d6c',
-    mdHeading: '#d7ff5f',
+    accent: '#78d98f',
+    bg: '#06100a',
+    bgSecondary: '#0c1710',
+    bgTertiary: '#122219',
+    bgHover: '#1a3023',
+    border: '#2f5a3c',
+    borderMuted: '#1c3a27',
+    selectedBg: '#204a2e',
+    text: '#e6f8ea',
+    muted: '#9ec7aa',
+    dim: '#6d8f78',
+    warning: '#d6c76b',
+    success: '#78d98f',
+    error: '#e66f7b',
+    mdHeading: '#d6c76b',
   }),
   themeVariant('coffeehouse', {
-    accent: '#d99a5b',
-    bg: '#17100d',
-    bgSecondary: '#211713',
-    bgTertiary: '#30211a',
-    bgHover: '#3f2d24',
-    border: '#60483a',
-    borderMuted: '#3d2d25',
-    selectedBg: '#4b3328',
+    accent: '#74b7a0',
+    bg: '#17120f',
+    bgSecondary: '#211916',
+    bgTertiary: '#2f241f',
+    bgHover: '#3d3029',
+    border: '#5b493f',
+    borderMuted: '#3a302a',
+    selectedBg: '#2f463d',
     text: '#fff0df',
-    muted: '#c2a28b',
-    dim: '#866b59',
-    warning: '#f4c06a',
-    success: '#8aca83',
-    error: '#e66f63',
+    muted: '#c1a794',
+    dim: '#877268',
+    warning: '#e7b86b',
+    success: '#87c98d',
+    error: '#e17268',
+    mdLink: '#8bc9d9',
   }),
   themeVariant('iceberg', {
     accent: '#2d7dd2',
@@ -785,54 +880,104 @@ export const BUILTIN_THEMES: PiTheme[] = [
 ];
 
 function themeVariant(name: string, colors: ThemeColors): PiTheme {
-  const accent = colors.accent ?? '#00aaff';
-  const text = colors.text ?? '#e0e0e8';
-  const bg = colors.bg ?? '#1a1a1e';
-  const bgSecondary = colors.bgSecondary ?? bg;
-  const bgTertiary = colors.bgTertiary ?? bgSecondary;
-  const bgHover = colors.bgHover ?? bgTertiary;
-  const border = colors.border ?? '#3a3a3e';
-  const selectedBg = colors.selectedBg ?? bgHover;
-  const warning = colors.warning ?? '#ffaa00';
-  const success = colors.success ?? '#00cc66';
-  const error = colors.error ?? '#ff4444';
+  const accent = colors.accent ?? '#5ac8fa';
+  const text = colors.text ?? '#edf0f7';
+  const bg = colors.bg ?? '#111318';
+  const light = relativeLuminance(bg) > 0.55;
+  const bgSecondary = colors.bgSecondary ?? mixColor(bg, text, light ? 0.018 : 0.045);
+  const bgTertiary = colors.bgTertiary ?? mixColor(bg, text, light ? 0.055 : 0.095);
+  const bgHover = colors.bgHover ?? mixColor(bg, text, light ? 0.09 : 0.14);
+  const border = colors.border ?? mixColor(bg, text, light ? 0.16 : 0.22);
+  const borderMuted = colors.borderMuted ?? mixColor(bg, text, light ? 0.1 : 0.15);
+  const selectedBg = colors.selectedBg ?? mixColor(bg, accent, light ? 0.12 : 0.2);
+  const warning = colors.warning ?? (light ? '#9b6400' : '#f6c177');
+  const success = colors.success ?? (light ? '#1f8f55' : '#63d48a');
+  const error = colors.error ?? (light ? '#c8404a' : '#ff6b72');
+  const muted = colors.muted ?? mixColor(text, bg, light ? 0.34 : 0.31);
+  const dim = colors.dim ?? mixColor(text, bg, light ? 0.54 : 0.58);
+  const readableAccent = ensureContrast(accent, bg, text, 4.5);
+  const readableSuccess = ensureContrast(success, bg, text, 4.5);
+  const readableWarning = ensureContrast(warning, bg, text, 4.5);
+  const readableError = ensureContrast(error, bg, text, 4.5);
+  const codeAccent = ensureContrast(mixColor(accent, success, 0.42), bg, text, 4.5);
 
   return {
     name,
     colors: {
-      borderAccent: accent,
+      border,
+      borderAccent: readableAccent,
+      borderMuted,
+      muted,
+      dim,
+      thinkingText: colors.thinkingText ?? muted,
       titlebarBg: colors.titlebarBg ?? bgSecondary,
       titlebarText: colors.titlebarText ?? text,
       titlebarBorder: colors.titlebarBorder ?? border,
       titlebarHover: colors.titlebarHover ?? bgHover,
       titlebarActive: colors.titlebarActive ?? selectedBg,
-      userMessageBg: colors.userMessageBg ?? selectedBg,
+      selectedBg,
+      userMessageBg: colors.userMessageBg ?? mixColor(bg, accent, light ? 0.08 : 0.16),
       userMessageText: colors.userMessageText ?? text,
-      customMessageBg: colors.customMessageBg ?? selectedBg,
+      customMessageBg: colors.customMessageBg ?? mixColor(bg, accent, light ? 0.055 : 0.115),
       customMessageText: colors.customMessageText ?? text,
-      customMessageLabel: colors.customMessageLabel ?? accent,
+      customMessageLabel: colors.customMessageLabel ?? readableAccent,
       toolPendingBg: colors.toolPendingBg ?? bgTertiary,
-      toolSuccessBg: colors.toolSuccessBg ?? bgTertiary,
-      toolErrorBg: colors.toolErrorBg ?? bgTertiary,
-      toolTitle: colors.toolTitle ?? accent,
-      mdHeading: colors.mdHeading ?? warning,
-      mdLink: colors.mdLink ?? accent,
-      mdCode: colors.mdCode ?? accent,
-      mdListBullet: colors.mdListBullet ?? accent,
-      syntaxKeyword: colors.syntaxKeyword ?? accent,
-      syntaxFunction: colors.syntaxFunction ?? accent,
-      syntaxType: colors.syntaxType ?? accent,
-      syntaxOperator: colors.syntaxOperator ?? accent,
-      syntaxString: colors.syntaxString ?? success,
-      syntaxNumber: colors.syntaxNumber ?? warning,
-      thinkingMinimal: colors.thinkingMinimal ?? accent,
-      thinkingLow: colors.thinkingLow ?? accent,
-      thinkingMedium: colors.thinkingMedium ?? accent,
-      thinkingHigh: colors.thinkingHigh ?? warning,
-      thinkingXhigh: colors.thinkingXhigh ?? error,
+      toolSuccessBg: colors.toolSuccessBg ?? mixColor(bg, success, light ? 0.08 : 0.12),
+      toolErrorBg: colors.toolErrorBg ?? mixColor(bg, error, light ? 0.07 : 0.11),
+      toolTitle: colors.toolTitle ?? readableAccent,
+      toolOutput: colors.toolOutput ?? text,
+      mdHeading: colors.mdHeading ?? readableWarning,
+      mdLink: colors.mdLink ?? readableAccent,
+      mdLinkUrl: colors.mdLinkUrl ?? muted,
+      mdCode: colors.mdCode ?? codeAccent,
+      mdCodeBlock: colors.mdCodeBlock ?? text,
+      mdCodeBlockBorder: colors.mdCodeBlockBorder ?? mixColor(border, accent, 0.18),
+      mdQuote: colors.mdQuote ?? muted,
+      mdQuoteBorder: colors.mdQuoteBorder ?? mixColor(border, accent, 0.28),
+      mdHr: colors.mdHr ?? border,
+      mdListBullet: colors.mdListBullet ?? codeAccent,
+      toolDiffAdded: colors.toolDiffAdded ?? readableSuccess,
+      toolDiffRemoved: colors.toolDiffRemoved ?? readableError,
+      toolDiffContext: colors.toolDiffContext ?? muted,
+      syntaxComment: colors.syntaxComment ?? dim,
+      syntaxKeyword: colors.syntaxKeyword ?? readableAccent,
+      syntaxFunction: colors.syntaxFunction ?? codeAccent,
+      syntaxVariable: colors.syntaxVariable ?? readableWarning,
+      syntaxString: colors.syntaxString ?? readableSuccess,
+      syntaxNumber: colors.syntaxNumber ?? ensureContrast(mixColor(warning, error, 0.28), bg, text, 4.5),
+      syntaxType: colors.syntaxType ?? ensureContrast(mixColor(accent, text, light ? 0.22 : 0.18), bg, text, 4.5),
+      syntaxOperator: colors.syntaxOperator ?? readableAccent,
+      syntaxPunctuation: colors.syntaxPunctuation ?? muted,
+      thinkingOff: colors.thinkingOff ?? dim,
+      thinkingMinimal: colors.thinkingMinimal ?? readableAccent,
+      thinkingLow: colors.thinkingLow ?? codeAccent,
+      thinkingMedium: colors.thinkingMedium ?? readableSuccess,
+      thinkingHigh: colors.thinkingHigh ?? readableWarning,
+      thinkingXhigh: colors.thinkingXhigh ?? readableError,
+      bashMode: colors.bashMode ?? readableWarning,
       ...colors,
     },
   };
+}
+
+function mixColor(a: string, b: string, amountOfB: number): string {
+  const first = parseHexColor(a);
+  const second = parseHexColor(b);
+  if (!first || !second) return a;
+  const weight = Math.max(0, Math.min(1, amountOfB));
+  const channels = first.map((channel, index) => Math.round(channel * (1 - weight) + second[index]! * weight));
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function ensureContrast(foreground: string, background: string, target: string, minimumRatio: number): string {
+  if (contrastRatio(foreground, background) >= minimumRatio) return foreground;
+
+  for (let step = 1; step <= 8; step++) {
+    const candidate = mixColor(foreground, target, step * 0.1);
+    if (contrastRatio(candidate, background) >= minimumRatio) return candidate;
+  }
+
+  return target;
 }
 
 const TOKEN_VAR_ALIASES: Record<string, string[]> = {
@@ -862,6 +1007,7 @@ export function applyRuntimeSettings(
   root.style.setProperty('--font-sans', sanitizeFontStack(settings.fontFamily, DEFAULT_FONT_FAMILY));
   root.style.setProperty('--font-display', sanitizeFontStack(settings.fontFamily, DEFAULT_FONT_FAMILY));
   root.style.setProperty('--font-mono', sanitizeFontStack(settings.monoFontFamily, DEFAULT_MONO_FONT_FAMILY));
+  root.style.setProperty('--font-code-editor', codeEditorFontStack(settings.monoFontFamily, settings.fontFamily));
   root.style.colorScheme = isLightTheme(runtimeTheme.colors, runtimeTheme.name) ? 'light' : 'dark';
 
   applyThemeColors(runtimeTheme.colors, runtimeTheme.vars);
@@ -873,18 +1019,48 @@ function sanitizeFontStack(value: string | undefined, fallback: string): string 
   return trimmed;
 }
 
+function codeEditorFontStack(monoValue: string | undefined, sansValue: string | undefined): string {
+  const mono = sanitizeFontStack(monoValue, DEFAULT_MONO_FONT_FAMILY)
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item && item.toLowerCase() !== 'monospace')
+    .join(', ');
+  const sans = sanitizeFontStack(sansValue, DEFAULT_FONT_FAMILY);
+
+  return [
+    mono || DEFAULT_MONO_FONT_FAMILY.replace(/,\s*monospace\s*$/i, ''),
+    sans,
+    "'PingFang SC'",
+    "'Microsoft YaHei UI'",
+    "'Microsoft YaHei'",
+    "'Noto Sans CJK SC'",
+    'monospace',
+  ].join(', ');
+}
+
 export function resolveRuntimeTheme(themeName: string, themes: PiTheme[] = []): PiTheme {
-  const serverTheme = themes.find((theme) => theme.name === themeName);
-  const baseTheme = baseThemeFor(serverTheme ?? BUILTIN_THEMES.find((theme) => theme.name === themeName), themeName);
+  const suppliedThemes = themes.filter((theme) => theme.name === themeName && hasUsableThemeColors(theme));
+  const serverTheme = suppliedThemes[suppliedThemes.length - 1];
+  const fallbackTheme = BUILTIN_THEMES.find((theme) => theme.name === DEFAULT_THEME_NAME) ?? BUILTIN_THEMES[0]!;
+  const builtinTheme = BUILTIN_THEMES.find((theme) => theme.name === themeName) ?? (serverTheme ? undefined : fallbackTheme);
+  const baseTheme = baseThemeFor(serverTheme ?? builtinTheme, themeName);
+  const resolvedName = serverTheme?.name ?? builtinTheme?.name ?? DEFAULT_THEME_NAME;
 
   return {
-    name: serverTheme?.name ?? themeName,
-    vars: serverTheme?.vars,
+    name: resolvedName,
+    vars: {
+      ...(builtinTheme?.vars ?? {}),
+      ...(serverTheme?.vars ?? {}),
+    },
     colors: {
       ...baseTheme.colors,
-      ...(serverTheme?.colors ?? BUILTIN_THEMES.find((theme) => theme.name === themeName)?.colors ?? {}),
+      ...(builtinTheme?.colors ?? {}),
+      ...(serverTheme?.colors ?? {}),
     },
-    export: serverTheme?.export,
+    export: {
+      ...(builtinTheme?.export ?? {}),
+      ...(serverTheme?.export ?? {}),
+    },
   };
 }
 
@@ -896,6 +1072,7 @@ export function listRuntimeThemes(themes: PiTheme[] = []): PiTheme[] {
   }
 
   for (const theme of themes) {
+    if (!hasUsableThemeColors(theme)) continue;
     byName.set(theme.name, {
       ...theme,
       colors: resolveRuntimeTheme(theme.name, themes).colors,
@@ -905,8 +1082,28 @@ export function listRuntimeThemes(themes: PiTheme[] = []): PiTheme[] {
   return Array.from(byName.values()).sort((a, b) => themePriority(a.name) - themePriority(b.name));
 }
 
+function hasUsableThemeColors(theme: PiTheme): boolean {
+  return Boolean(theme?.name && theme.colors && Object.keys(theme.colors).length > 0);
+}
+
 export function themeDisplayName(name: string): string {
   return THEME_DISPLAY_NAMES[name] ?? name.replace(/[-_]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+export function themeSeries(theme: PiTheme): ThemeSeries {
+  if (LIGHT_THEME_NAMES.includes(theme.name)) return 'light';
+  if (DARK_THEME_NAMES.includes(theme.name)) return 'dark';
+  return isLightTheme(theme.colors, theme.name) ? 'light' : 'dark';
+}
+
+export function groupRuntimeThemesBySeries(themes: PiTheme[]): Record<ThemeSeries, PiTheme[]> {
+  return themes.reduce<Record<ThemeSeries, PiTheme[]>>(
+    (groups, theme) => {
+      groups[themeSeries(theme)].push(theme);
+      return groups;
+    },
+    { dark: [], light: [] },
+  );
 }
 
 function themePriority(name: string): number {
@@ -951,15 +1148,34 @@ function isLightTheme(colors: ThemeColors, name: string): boolean {
 }
 
 function relativeLuminance(color: string): number {
-  const hex = color.trim().replace(/^#/, '');
-  if (!/^[0-9a-f]{6}$/i.test(hex)) return 0;
+  const rgb = parseHexColor(color);
+  if (!rgb) return 0;
 
-  const channels = [0, 2, 4].map((start) => {
-    const value = parseInt(hex.slice(start, start + 2), 16) / 255;
+  const channels = rgb.map((channel) => {
+    const value = channel / 255;
     return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
   });
 
   return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function parseHexColor(color: string): [number, number, number] | null {
+  const raw = color.trim().replace(/^#/, '');
+  const hex = /^[0-9a-f]{3}$/i.test(raw)
+    ? raw.split('').map((char) => `${char}${char}`).join('')
+    : raw;
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+  return [
+    parseInt(hex.slice(0, 2), 16),
+    parseInt(hex.slice(2, 4), 16),
+    parseInt(hex.slice(4, 6), 16),
+  ];
 }
 
 function toKebab(value: string): string {

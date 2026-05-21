@@ -11,6 +11,7 @@ import { cn } from '../shared/utils';
 interface WorkspaceSwitcherProps {
   activeSession: Session;
   placement?: 'standalone' | 'composer' | 'toolbar';
+  compact?: boolean;
 }
 
 interface WorkspaceOption {
@@ -23,7 +24,7 @@ interface WorkspaceOption {
   source: 'session' | 'recent';
 }
 
-export function WorkspaceSwitcher({ activeSession, placement = 'standalone' }: WorkspaceSwitcherProps) {
+export function WorkspaceSwitcher({ activeSession, placement = 'standalone', compact = false }: WorkspaceSwitcherProps) {
   const { t } = useI18n();
   const sessions = useChatStore((s) => s.sessions);
   const setActiveSession = useChatStore((s) => s.setActiveSession);
@@ -131,18 +132,19 @@ export function WorkspaceSwitcher({ activeSession, placement = 'standalone' }: W
   return (
     <div
       className={cn(
-        'relative bg-pi-bg',
+        'relative z-[70] bg-pi-bg',
         placement === 'standalone' && 'border-t border-pi-border px-3 py-2',
         placement === 'composer' && 'px-3 py-1',
-        placement === 'toolbar' && 'min-w-[220px] flex-1 bg-transparent px-0 py-0'
+        placement === 'toolbar' && 'min-w-0 flex-1 bg-transparent px-0 py-0'
       )}
     >
       {open && (
         <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="fixed inset-0 z-[80]" onClick={() => setOpen(false)} />
           <div
             className={cn(
-              'absolute bottom-full z-40 mb-2 w-[min(520px,calc(100vw-360px))] min-w-[320px] overflow-hidden rounded-lg border border-pi-border bg-pi-bg-secondary shadow-2xl shadow-black/30',
+              'absolute bottom-full z-[90] mb-2 overflow-hidden rounded-lg border border-pi-border bg-pi-bg-secondary shadow-2xl shadow-black/30',
+              compact ? 'w-[min(420px,calc(100vw-32px))] min-w-[280px]' : 'w-[min(520px,calc(100vw-360px))] min-w-[320px]',
               placement === 'toolbar' ? 'left-0' : 'left-3'
             )}
           >
@@ -198,7 +200,7 @@ export function WorkspaceSwitcher({ activeSession, placement = 'standalone' }: W
         onClick={() => setOpen((current) => !current)}
         className={cn(
           'flex w-full items-center gap-2 rounded-md border text-left text-xs transition-colors',
-          placement === 'toolbar' ? 'h-7 max-w-none px-2' : 'mx-auto h-8 max-w-3xl px-3',
+          placement === 'toolbar' ? 'h-7 min-w-0 max-w-none px-2' : 'mx-auto h-8 max-w-3xl px-3',
           open
             ? 'border-pi-accent/50 bg-pi-accent/10 text-pi-text'
             : 'border-pi-border bg-pi-bg-secondary text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
@@ -208,15 +210,15 @@ export function WorkspaceSwitcher({ activeSession, placement = 'standalone' }: W
         <FolderOpen size={14} className="flex-shrink-0 text-pi-accent" />
         <span className="min-w-0 flex-1 truncate">
           <span className="font-medium text-pi-text">{activeSession.projectName}</span>
-          <span className="ml-2 text-pi-dim">{activeSession.projectPath}</span>
+          {!compact && <span className="ml-2 text-pi-dim">{activeSession.projectPath}</span>}
         </span>
-        {activeSession.branch && (
+        {!compact && activeSession.branch && (
           <span className="hidden max-w-[160px] items-center gap-1 truncate rounded bg-pi-bg-tertiary px-1.5 py-0.5 text-[10px] text-pi-dim sm:inline-flex">
             <GitBranch size={10} />
             {activeSession.branch}
           </span>
         )}
-        <span className="text-[10px] font-medium text-pi-dim">{t('workspaceSwitcher.switch')}</span>
+        {!compact && <span className="text-[10px] font-medium text-pi-dim">{t('workspaceSwitcher.switch')}</span>}
         <ChevronDown size={14} className={cn('flex-shrink-0 transition-transform', open && 'rotate-180')} />
       </button>
     </div>

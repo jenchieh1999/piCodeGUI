@@ -2,11 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import { StatusBar } from './StatusBar';
 import { RightPanel } from './RightPanel';
-import { PermissionOverlay } from '../chat/PermissionDialog';
 import { DesktopTitleBar } from '../desktop/DesktopTitleBar';
 import { ToastContainer } from '../shared/ToastContainer';
 import { useUIStore } from '../../stores/uiStore';
-import { useChatStore } from '../../stores/chatStore';
 import { useI18n } from '../../lib/i18n';
 import { cn } from '../shared/utils';
 
@@ -28,7 +26,6 @@ export function AppShell({ children }: AppShellProps) {
   const rightPanelType = useUIStore((s) => s.rightPanelType);
   const rightPanelWidth = useUIStore((s) => s.rightPanelWidth);
   const setRightPanelWidth = useUIStore((s) => s.setRightPanelWidth);
-  const pendingPermission = useChatStore((s) => s.pendingPermission);
   const [isResizingRightPanel, setIsResizingRightPanel] = useState(false);
   const resizeStateRef = useRef({ startX: 0, startWidth: RIGHT_PANEL_DEFAULT_WIDTH });
 
@@ -185,9 +182,6 @@ export function AppShell({ children }: AppShellProps) {
 
       {/* Status Bar */}
       <StatusBar />
-
-      {/* Permission Overlay */}
-      {pendingPermission && <PermissionOverlay />}
 
       {/* Toast Container */}
       <ToastContainer />

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, dialog, ipcMain, Menu, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, Tray, dialog, ipcMain, Menu, nativeImage, shell, session: electronSession } = require('electron');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
 const fs = require('node:fs');
@@ -23,7 +23,10 @@ const MAX_LOG_LINES = 160;
 const WINDOW_STATE_FILE = 'window-state.json';
 const LOG_FILE = 'desktop.log';
 const APP_USER_MODEL_ID = 'works.pi-agent.desktop';
-const UPDATE_FEED_URL = (process.env.PI_DESKTOP_UPDATE_URL ?? '').trim();
+const RAW_UPDATE_FEED_URL = (process.env.PI_DESKTOP_UPDATE_URL ?? '').trim();
+const UPDATE_FEED = normalizeUpdateFeedUrl(RAW_UPDATE_FEED_URL);
+const UPDATE_FEED_URL = UPDATE_FEED.url;
+const UPDATE_FEED_ERROR = UPDATE_FEED.error;
 const UPDATE_CHANNEL = (process.env.PI_DESKTOP_UPDATE_CHANNEL ?? 'latest').trim() || 'latest';
 const AUTO_UPDATE_DISABLED = process.env.PI_DESKTOP_DISABLE_AUTO_UPDATE === '1';
 
@@ -37,6 +40,9 @@ let tray = null;
 let isQuitting = false;
 let saveWindowTimer = null;
 const markdownWindows = new Set();
+const standaloneTabGroups = new Map();
+let standaloneGroupCounter = 0;
+let lastStandaloneGroupId = null;
 const updateStatus = createInitialUpdateStatus();
 let updaterConfigured = false;
 let updateCheckInFlight = false;
@@ -160,6 +166,37 @@ function waitForHttpOk(url, timeoutMs) {
   });
 }
 
+function normalizeUpdateFeedUrl(rawUrl) {
+  if (!rawUrl) return { url: '', error: null };
+
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { url: '', error: `Invalid update feed URL: ${rawUrl}` };
+  }
+
+  const allowInsecure = process.env.PI_DESKTOP_ALLOW_INSECURE_UPDATE_FEED === '1';
+  const isLocalHttp = parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname);
+  const isAllowed =
+    parsed.protocol === 'https:' ||
+    (isLocalHttp && (isDev || isSmoke || allowInsecure)) ||
+    (allowInsecure && parsed.protocol === 'file:');
+
+  if (!isAllowed) {
+    return {
+      url: '',
+      error: 'Auto update feed must use HTTPS. Only loopback HTTP in dev/smoke or explicitly allowed file/http feeds are accepted.',
+    };
+  }
+
+  return { url: parsed.toString().replace(/\/+$/g, ''), error: null };
+}
+
+function isLoopbackHostname(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
 function requestJson(url, headers = {}, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const req = http.get(url, { headers }, (res) => {
@@ -186,6 +223,35 @@ function requestJson(url, headers = {}, timeoutMs = 5000) {
       req.destroy(new Error(`Timed out fetching ${url}`));
     });
   });
+}
+
+function setupContentSecurityPolicy() {
+  if (isDev || isSmoke || !app.isPackaged) return;
+
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: file: http: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+
+  electronSession.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...(details.responseHeaders ?? {}),
+        'Content-Security-Policy': [csp],
+      },
+    });
+  });
+
+  pushLog('security', 'Production Content-Security-Policy is enabled.');
 }
 
 async function startServer() {
@@ -414,11 +480,12 @@ function createInitialUpdateStatus() {
 }
 
 function isUpdateSupported() {
-  return Boolean(autoUpdater) && app.isPackaged && !isSmoke && !AUTO_UPDATE_DISABLED;
+  return Boolean(autoUpdater) && app.isPackaged && !isSmoke && !AUTO_UPDATE_DISABLED && !UPDATE_FEED_ERROR;
 }
 
 function getUpdateUnsupportedReason() {
   if (AUTO_UPDATE_DISABLED) return 'Auto update is disabled by PI_DESKTOP_DISABLE_AUTO_UPDATE.';
+  if (UPDATE_FEED_ERROR) return UPDATE_FEED_ERROR;
   if (!autoUpdater) return updaterLoadError || 'electron-updater is not available.';
   if (isSmoke) return 'Auto update is disabled during smoke checks.';
   if (!app.isPackaged) return 'Auto update is available in packaged builds only.';
@@ -463,6 +530,12 @@ function setupAutoUpdater() {
   if (!autoUpdater) {
     markUpdateUnsupported();
     pushLog('updater', `electron-updater unavailable: ${updaterLoadError || 'module not found'}`);
+    return;
+  }
+
+  if (UPDATE_FEED_ERROR) {
+    markUpdateUnsupported();
+    pushLog('updater', UPDATE_FEED_ERROR);
     return;
   }
 
@@ -776,6 +849,73 @@ function sendMenuCommand(command) {
   mainWindow.webContents.send('desktop:menu-command', command);
 }
 
+function hardenBrowserWindow(targetWindow) {
+  targetWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalUrl(url);
+    return { action: 'deny' };
+  });
+
+  targetWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAllowedRendererNavigation(url)) return;
+    event.preventDefault();
+    openExternalUrl(url);
+  });
+}
+
+function openExternalUrl(rawUrl) {
+  const url = safeExternalUrl(rawUrl);
+  if (!url) {
+    pushLog('security', `Blocked external URL: ${String(rawUrl).slice(0, 300)}`);
+    return false;
+  }
+
+  shell.openExternal(url.toString()).catch((err) => {
+    pushLog('security', `Failed to open external URL: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  return true;
+}
+
+function safeExternalUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === 'https:' || url.protocol === 'mailto:') {
+      return url;
+    }
+    if (url.protocol === 'http:' && isLoopbackHostname(url.hostname)) return url;
+  } catch {
+    // Fall through to blocked.
+  }
+  return null;
+}
+
+function isAllowedRendererNavigation(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === 'file:' || url.protocol === 'data:' || url.protocol === 'about:') return true;
+    return isDev && (url.protocol === 'http:' || url.protocol === 'https:') && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedRendererUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === 'file:') return true;
+    return isDev && (url.protocol === 'http:' || url.protocol === 'https:') && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function requireTrustedIpc(event) {
+  const senderUrl = event.senderFrame?.url || event.sender.getURL();
+  if (!isTrustedRendererUrl(senderUrl)) {
+    pushLog('security', `Blocked IPC from untrusted renderer: ${String(senderUrl).slice(0, 300)}`);
+    throw new Error('Blocked IPC from untrusted renderer.');
+  }
+}
+
 function setupRendererContextMenu(targetWindow) {
   targetWindow.webContents.on('context-menu', (event, params) => {
     const hasSelection = Boolean(params.selectionText && params.selectionText.trim());
@@ -819,6 +959,63 @@ async function openDirectory(targetPath) {
     pushLog('desktop', `Unable to open ${targetPath}: ${message}`);
     return message;
   }
+}
+
+function normalizeWorkspacePath(value) {
+  return String(value ?? '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
+function resolveWorkspacePathInsideRoot(workDir, workspacePath) {
+  const root = path.resolve(String(workDir ?? ''));
+  if (!root || !fs.existsSync(root)) {
+    throw new Error(`Workspace folder does not exist: ${root}`);
+  }
+
+  const normalized = normalizeWorkspacePath(workspacePath);
+  const target = path.resolve(root, normalized || '.');
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+    throw new Error('Path escapes the current workspace.');
+  }
+  return target;
+}
+
+async function revealWorkspacePath(workDir, workspacePath) {
+  try {
+    const target = resolveWorkspacePathInsideRoot(workDir, workspacePath);
+    if (!fs.existsSync(target)) {
+      const parent = path.dirname(target);
+      if (!fs.existsSync(parent)) {
+        throw new Error(`Path does not exist: ${target}`);
+      }
+      shell.showItemInFolder(parent);
+      return { ok: true, path: parent, missing: true };
+    }
+
+    shell.showItemInFolder(target);
+    return { ok: true, path: target };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    pushLog('desktop', `Unable to reveal workspace path: ${message}`);
+    return { ok: false, error: message };
+  }
+}
+
+function sanitizeWorkspaceReference(input) {
+  if (!input || typeof input !== 'object') return null;
+  const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
+  const workspacePath = typeof input.path === 'string' ? input.path : '';
+  if (!sessionId || !workspacePath) return null;
+
+  const detail = {
+    sessionId,
+    path: workspacePath,
+    name: typeof input.name === 'string' ? input.name : path.basename(workspacePath),
+  };
+  if (Number.isInteger(input.lineStart) && input.lineStart > 0) detail.lineStart = input.lineStart;
+  if (Number.isInteger(input.lineEnd) && input.lineEnd > 0) detail.lineEnd = input.lineEnd;
+  if (typeof input.excerpt === 'string') detail.excerpt = input.excerpt;
+  if (input.sourceKind === 'file' || input.sourceKind === 'diff') detail.sourceKind = input.sourceKind;
+  return detail;
 }
 
 async function createMainWindow() {
@@ -874,10 +1071,7 @@ async function createMainWindow() {
     mainWindow?.show();
     emitWindowState(mainWindow);
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url).catch(() => {});
-    return { action: 'deny' };
-  });
+  hardenBrowserWindow(mainWindow);
   setupRendererContextMenu(mainWindow);
   mainWindow.webContents.on('console-message', (_event, levelOrDetails, message, line, sourceId) => {
     if (typeof levelOrDetails === 'object' && levelOrDetails) {
@@ -918,11 +1112,361 @@ async function createMainWindow() {
 }
 
 async function createMarkdownWindow(sessionId, filePath) {
-  return createStandaloneFileWindow(sessionId, filePath, 'markdown');
+  return openStandaloneTab({
+    type: 'markdown',
+    sessionId,
+    filePath,
+  });
 }
 
 async function createWorkspaceFileWindow(sessionId, filePath) {
-  return createStandaloneFileWindow(sessionId, filePath, isMarkdownPath(filePath) ? 'markdown' : 'workspace-file');
+  return openStandaloneTab({
+    type: isMarkdownPath(filePath) ? 'markdown' : 'workspace-file',
+    sessionId,
+    filePath,
+  });
+}
+
+async function createWorkspaceFileDetachedWindow(sessionId, filePath, screenPoint) {
+  const group = createStandaloneTabGroup();
+  return openStandaloneTab({
+    type: isMarkdownPath(filePath) ? 'markdown' : 'workspace-file',
+    sessionId,
+    filePath,
+  }, group, screenPoint);
+}
+
+async function createWorkspaceFileTabInGroup(group, sessionId, filePath) {
+  return openStandaloneTab({
+    type: isMarkdownPath(filePath) ? 'markdown' : 'workspace-file',
+    sessionId,
+    filePath,
+  }, group);
+}
+
+async function createTerminalWindow(sessionId) {
+  if (!sessionId) {
+    throw new Error('Standalone terminal window requires sessionId.');
+  }
+
+  return openStandaloneTab({
+    type: 'terminal',
+    sessionId,
+  });
+}
+
+async function openStandaloneTab(input, targetGroup, screenPoint) {
+  const tab = normalizeStandaloneTab(input);
+  const existingGroup = findStandaloneGroupByTab(tab.id);
+  const group = targetGroup ?? existingGroup ?? preferredStandaloneGroup() ?? createStandaloneTabGroup();
+
+  if (existingGroup && targetGroup && existingGroup.id !== targetGroup.id) {
+    const sourceIndex = existingGroup.tabs.findIndex((item) => item.id === tab.id);
+    if (sourceIndex >= 0) {
+      const [existingTab] = existingGroup.tabs.splice(sourceIndex, 1);
+      if (!group.tabs.some((item) => item.id === existingTab.id)) {
+        group.tabs.push(existingTab);
+      }
+      if (existingGroup.activeTabId === existingTab.id) {
+        existingGroup.activeTabId = existingGroup.tabs[Math.min(sourceIndex, existingGroup.tabs.length - 1)]?.id ?? null;
+      }
+      if (existingGroup.tabs.length === 0) {
+        const sourceWindow = existingGroup.window;
+        if (sourceWindow && !sourceWindow.isDestroyed()) {
+          sourceWindow.close();
+        } else {
+          standaloneTabGroups.delete(existingGroup.id);
+        }
+      } else {
+        emitStandaloneTabs(existingGroup);
+      }
+    }
+  } else if (!existingGroup) {
+    group.tabs.push(tab);
+  }
+  group.activeTabId = tab.id;
+  lastStandaloneGroupId = group.id;
+
+  const tabWindow = await ensureStandaloneTabsWindow(group, screenPoint);
+  emitStandaloneTabs(group);
+
+  if (tabWindow.isMinimized()) tabWindow.restore();
+  tabWindow.show();
+  tabWindow.focus();
+  return true;
+}
+
+function normalizeStandaloneTab(input) {
+  if (!input.sessionId) {
+    throw new Error('Standalone tab requires sessionId.');
+  }
+  if (input.type !== 'terminal' && !input.filePath) {
+    throw new Error('Standalone file tab requires filePath.');
+  }
+
+  const type = input.type;
+  const filePath = input.filePath ? String(input.filePath) : null;
+  const id = type === 'terminal'
+    ? `terminal:${input.sessionId}`
+    : `${type}:${input.sessionId}:${filePath}`;
+  const title = type === 'terminal' ? 'Terminal' : path.basename(filePath);
+
+  return {
+    id,
+    type,
+    title,
+    sessionId: input.sessionId,
+    filePath,
+  };
+}
+
+function createStandaloneTabGroup() {
+  const group = {
+    id: `tools-${Date.now()}-${++standaloneGroupCounter}`,
+    window: null,
+    tabs: [],
+    activeTabId: null,
+  };
+  standaloneTabGroups.set(group.id, group);
+  return group;
+}
+
+function preferredStandaloneGroup() {
+  const lastGroup = lastStandaloneGroupId ? standaloneTabGroups.get(lastStandaloneGroupId) : null;
+  if (lastGroup && lastGroup.window && !lastGroup.window.isDestroyed()) {
+    return lastGroup;
+  }
+
+  for (const group of standaloneTabGroups.values()) {
+    if (group.window && !group.window.isDestroyed()) {
+      return group;
+    }
+  }
+
+  return null;
+}
+
+function findStandaloneGroupByTab(tabId) {
+  for (const group of standaloneTabGroups.values()) {
+    if (group.tabs.some((tab) => tab.id === tabId)) {
+      return group;
+    }
+  }
+  return null;
+}
+
+function findStandaloneGroupByWebContents(webContents) {
+  for (const group of standaloneTabGroups.values()) {
+    if (group.window && !group.window.isDestroyed() && group.window.webContents === webContents) {
+      return group;
+    }
+  }
+  return null;
+}
+
+function standaloneGroupFromEvent(event) {
+  const group = findStandaloneGroupByWebContents(event.sender);
+  if (group) return group;
+  return preferredStandaloneGroup() ?? createStandaloneTabGroup();
+}
+
+async function ensureStandaloneTabsWindow(group, screenPoint) {
+  if (group.window && !group.window.isDestroyed()) {
+    return group.window;
+  }
+
+  const windowOptions = {
+    width: 1120,
+    height: 780,
+    minWidth: 760,
+    minHeight: 520,
+    title: 'Pi Agent Tools',
+    icon: appIconPath(),
+    frame: process.platform === 'darwin',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    autoHideMenuBar: true,
+    backgroundColor: '#111114',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  };
+
+  if (screenPoint && Number.isFinite(screenPoint.x) && Number.isFinite(screenPoint.y)) {
+    windowOptions.x = Math.max(0, Math.round(screenPoint.x - 220));
+    windowOptions.y = Math.max(0, Math.round(screenPoint.y - 28));
+  }
+
+  const tabWindow = new BrowserWindow(windowOptions);
+  group.window = tabWindow;
+
+  markdownWindows.add(tabWindow);
+  applyWindowIcon(tabWindow);
+  tabWindow.on('closed', () => {
+    markdownWindows.delete(tabWindow);
+    if (group.window === tabWindow) {
+      group.window = null;
+      standaloneTabGroups.delete(group.id);
+      if (lastStandaloneGroupId === group.id) {
+        lastStandaloneGroupId = null;
+      }
+    }
+  });
+  tabWindow.on('maximize', () => emitWindowState(tabWindow));
+  tabWindow.on('unmaximize', () => emitWindowState(tabWindow));
+  tabWindow.on('focus', () => {
+    lastStandaloneGroupId = group.id;
+    emitWindowState(tabWindow);
+  });
+  tabWindow.on('blur', () => emitWindowState(tabWindow));
+  hardenBrowserWindow(tabWindow);
+  setupRendererContextMenu(tabWindow);
+
+  const params = new URLSearchParams({ desktopView: 'standalone-tabs', groupId: group.id });
+  if (isDev) {
+    const frontendUrl = process.env.PI_DESKTOP_FRONTEND_URL || 'http://localhost:1420';
+    await waitForHttpOk(frontendUrl, 30000);
+    await tabWindow.loadURL(`${frontendUrl}/?${params.toString()}`);
+  } else {
+    const indexHtml = path.join(repoRoot, 'frontend', 'dist', 'index.html');
+    if (!fs.existsSync(indexHtml)) {
+      await tabWindow.loadURL(errorHtml('Frontend build was not found.', `Missing file: ${indexHtml}`));
+      return tabWindow;
+    }
+    await tabWindow.loadFile(indexHtml, { search: `?${params.toString()}` });
+  }
+
+  return tabWindow;
+}
+
+function getStandaloneTabsState(group) {
+  return {
+    groupId: group.id,
+    tabs: group.tabs,
+    activeTabId: group.activeTabId,
+  };
+}
+
+function emitStandaloneTabs(group) {
+  if (!group.window || group.window.isDestroyed()) return;
+  group.window.setTitle(activeStandaloneTabTitle(group));
+  group.window.webContents.send('desktop:standalone-tabs-updated', getStandaloneTabsState(group));
+}
+
+function activeStandaloneTabTitle(group) {
+  const active = group.tabs.find((tab) => tab.id === group.activeTabId);
+  return active ? `${active.title} - Pi Agent Tools` : 'Pi Agent Tools';
+}
+
+function activateStandaloneTab(group, tabId) {
+  if (group.tabs.some((tab) => tab.id === tabId)) {
+    group.activeTabId = tabId;
+    lastStandaloneGroupId = group.id;
+    emitStandaloneTabs(group);
+  }
+  return getStandaloneTabsState(group);
+}
+
+function closeStandaloneTab(group, tabId) {
+  const index = group.tabs.findIndex((tab) => tab.id === tabId);
+  if (index < 0) return getStandaloneTabsState(group);
+
+  group.tabs.splice(index, 1);
+  if (group.tabs.length === 0) {
+    const tabWindow = group.window;
+    group.activeTabId = null;
+    if (tabWindow && !tabWindow.isDestroyed()) {
+      tabWindow.close();
+    }
+    return getStandaloneTabsState(group);
+  }
+
+  if (group.activeTabId === tabId) {
+    group.activeTabId = group.tabs[Math.min(index, group.tabs.length - 1)].id;
+  }
+  emitStandaloneTabs(group);
+  return getStandaloneTabsState(group);
+}
+
+async function detachStandaloneTab(event, tabId, screenPoint) {
+  if (screenPoint?.sourceGroupId) {
+    const hintedGroup = standaloneTabGroups.get(screenPoint.sourceGroupId);
+    if (!hintedGroup) {
+      return { groupId: screenPoint.sourceGroupId, tabs: [], activeTabId: null };
+    }
+    if (!hintedGroup.tabs.some((tab) => tab.id === tabId)) {
+      return getStandaloneTabsState(hintedGroup);
+    }
+  }
+
+  const sourceGroup = (screenPoint?.sourceGroupId ? standaloneTabGroups.get(screenPoint.sourceGroupId) : null)
+    ?? findStandaloneGroupByTab(tabId)
+    ?? standaloneGroupFromEvent(event);
+  const index = sourceGroup.tabs.findIndex((tab) => tab.id === tabId);
+  if (index < 0) return getStandaloneTabsState(sourceGroup);
+
+  if (sourceGroup.tabs.length <= 1) {
+    return activateStandaloneTab(sourceGroup, tabId);
+  }
+
+  const [tab] = sourceGroup.tabs.splice(index, 1);
+  if (sourceGroup.activeTabId === tabId) {
+    sourceGroup.activeTabId = sourceGroup.tabs[Math.min(index, sourceGroup.tabs.length - 1)]?.id ?? null;
+  }
+  emitStandaloneTabs(sourceGroup);
+
+  const targetGroup = createStandaloneTabGroup();
+  targetGroup.tabs.push(tab);
+  targetGroup.activeTabId = tab.id;
+  lastStandaloneGroupId = targetGroup.id;
+  const tabWindow = await ensureStandaloneTabsWindow(targetGroup, screenPoint);
+  emitStandaloneTabs(targetGroup);
+  tabWindow.show();
+  tabWindow.focus();
+
+  return getStandaloneTabsState(targetGroup);
+}
+
+async function moveStandaloneTab(event, tabId, targetGroupId) {
+  const sourceGroup = findStandaloneGroupByTab(tabId) ?? standaloneGroupFromEvent(event);
+  const targetGroup = standaloneTabGroups.get(targetGroupId) ?? standaloneGroupFromEvent(event);
+  const sourceIndex = sourceGroup.tabs.findIndex((tab) => tab.id === tabId);
+  if (sourceIndex < 0) return getStandaloneTabsState(targetGroup);
+
+  if (sourceGroup.id === targetGroup.id) {
+    return activateStandaloneTab(targetGroup, tabId);
+  }
+
+  const [tab] = sourceGroup.tabs.splice(sourceIndex, 1);
+  if (!targetGroup.tabs.some((item) => item.id === tab.id)) {
+    targetGroup.tabs.push(tab);
+  }
+  targetGroup.activeTabId = tab.id;
+  lastStandaloneGroupId = targetGroup.id;
+
+  if (sourceGroup.activeTabId === tabId) {
+    sourceGroup.activeTabId = sourceGroup.tabs[Math.min(sourceIndex, sourceGroup.tabs.length - 1)]?.id ?? null;
+  }
+
+  if (sourceGroup.tabs.length === 0) {
+    const sourceWindow = sourceGroup.window;
+    if (sourceWindow && !sourceWindow.isDestroyed()) {
+      sourceWindow.close();
+    } else {
+      standaloneTabGroups.delete(sourceGroup.id);
+    }
+  } else {
+    emitStandaloneTabs(sourceGroup);
+  }
+
+  await ensureStandaloneTabsWindow(targetGroup);
+  emitStandaloneTabs(targetGroup);
+  if (targetGroup.window && !targetGroup.window.isDestroyed()) {
+    targetGroup.window.focus();
+  }
+  return getStandaloneTabsState(targetGroup);
 }
 
 async function createStandaloneFileWindow(sessionId, filePath, desktopView) {
@@ -958,6 +1502,7 @@ async function createStandaloneFileWindow(sessionId, filePath, desktopView) {
   standaloneWindow.on('unmaximize', () => emitWindowState(standaloneWindow));
   standaloneWindow.on('focus', () => emitWindowState(standaloneWindow));
   standaloneWindow.on('blur', () => emitWindowState(standaloneWindow));
+  hardenBrowserWindow(standaloneWindow);
   setupRendererContextMenu(standaloneWindow);
 
   const params = new URLSearchParams({
@@ -1113,29 +1658,74 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
-ipcMain.handle('desktop:get-server-url', () => {
+ipcMain.handle('desktop:get-server-url', (event) => {
+  requireTrustedIpc(event);
   if (serverUrl) return serverUrl;
   throw new Error(startupError || 'Pi server is not ready yet.');
 });
-ipcMain.handle('desktop:get-server-auth-token', () => {
+ipcMain.handle('desktop:get-server-auth-token', (event) => {
+  requireTrustedIpc(event);
   if (serverAuthToken) return serverAuthToken;
   throw new Error(startupError || 'Pi server auth token is not ready yet.');
 });
-ipcMain.handle('desktop:get-startup-info', () => getStartupInfo());
-ipcMain.handle('desktop:restart-server', () => restartServer());
-ipcMain.handle('desktop:open-data-directory', () => openDirectory(dataDirPath()));
-ipcMain.handle('desktop:open-logs-directory', () => openDirectory(logDirPath()));
-ipcMain.handle('desktop:get-update-status', () => getUpdateStatus());
-ipcMain.handle('desktop:check-for-updates', () => checkForUpdates('manual'));
-ipcMain.handle('desktop:download-update', () => downloadUpdate());
-ipcMain.handle('desktop:install-update', () => installDownloadedUpdate());
-ipcMain.handle('desktop:get-window-state', (event) => getWindowState(windowFromEvent(event)));
+ipcMain.handle('desktop:get-startup-info', (event) => {
+  requireTrustedIpc(event);
+  return getStartupInfo();
+});
+ipcMain.handle('desktop:restart-server', (event) => {
+  requireTrustedIpc(event);
+  return restartServer();
+});
+ipcMain.handle('desktop:open-data-directory', (event) => {
+  requireTrustedIpc(event);
+  return openDirectory(dataDirPath());
+});
+ipcMain.handle('desktop:open-logs-directory', (event) => {
+  requireTrustedIpc(event);
+  return openDirectory(logDirPath());
+});
+ipcMain.handle('desktop:reveal-workspace-path', (event, workDir, workspacePath) => {
+  requireTrustedIpc(event);
+  return revealWorkspacePath(workDir, workspacePath);
+});
+ipcMain.handle('desktop:add-workspace-reference', (event, detail) => {
+  requireTrustedIpc(event);
+  const payload = sanitizeWorkspaceReference(detail);
+  if (!payload || !mainWindow || mainWindow.isDestroyed()) return false;
+  mainWindow.webContents.send('desktop:add-workspace-reference', payload);
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  return true;
+});
+ipcMain.handle('desktop:get-update-status', (event) => {
+  requireTrustedIpc(event);
+  return getUpdateStatus();
+});
+ipcMain.handle('desktop:check-for-updates', (event) => {
+  requireTrustedIpc(event);
+  return checkForUpdates('manual');
+});
+ipcMain.handle('desktop:download-update', (event) => {
+  requireTrustedIpc(event);
+  return downloadUpdate();
+});
+ipcMain.handle('desktop:install-update', (event) => {
+  requireTrustedIpc(event);
+  return installDownloadedUpdate();
+});
+ipcMain.handle('desktop:get-window-state', (event) => {
+  requireTrustedIpc(event);
+  return getWindowState(windowFromEvent(event));
+});
 ipcMain.handle('desktop:minimize-window', (event) => {
+  requireTrustedIpc(event);
   const targetWindow = windowFromEvent(event);
   targetWindow?.minimize();
   return getWindowState(targetWindow);
 });
 ipcMain.handle('desktop:toggle-maximize-window', (event) => {
+  requireTrustedIpc(event);
   const targetWindow = windowFromEvent(event);
   if (!targetWindow || targetWindow.isDestroyed()) return getWindowState(targetWindow);
   if (targetWindow.isMaximized()) {
@@ -1146,25 +1736,67 @@ ipcMain.handle('desktop:toggle-maximize-window', (event) => {
   return getWindowState(targetWindow);
 });
 ipcMain.handle('desktop:close-window', (event) => {
+  requireTrustedIpc(event);
   const targetWindow = windowFromEvent(event);
   targetWindow?.close();
   return getWindowState(targetWindow);
 });
-ipcMain.handle('desktop:select-project-directory', async () => {
-  const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+ipcMain.handle('desktop:select-project-directory', async (event) => {
+  requireTrustedIpc(event);
+  const targetWindow = windowFromEvent(event);
+  const result = await dialog.showOpenDialog(targetWindow ?? mainWindow ?? undefined, {
     title: 'Select project folder',
     properties: ['openDirectory'],
   });
   if (result.canceled) return null;
   return result.filePaths[0] ?? null;
 });
-ipcMain.handle('desktop:open-markdown-window', (_event, sessionId, filePath) => createMarkdownWindow(sessionId, filePath));
-ipcMain.handle('desktop:open-workspace-file-window', (_event, sessionId, filePath) => createWorkspaceFileWindow(sessionId, filePath));
+ipcMain.handle('desktop:open-markdown-window', (event, sessionId, filePath) => {
+  requireTrustedIpc(event);
+  return createMarkdownWindow(sessionId, filePath);
+});
+ipcMain.handle('desktop:open-workspace-file-window', (event, sessionId, filePath) => {
+  requireTrustedIpc(event);
+  return createWorkspaceFileWindow(sessionId, filePath);
+});
+ipcMain.handle('desktop:open-workspace-file-detached-window', (event, sessionId, filePath, screenPoint) => {
+  requireTrustedIpc(event);
+  return createWorkspaceFileDetachedWindow(sessionId, filePath, screenPoint);
+});
+ipcMain.handle('desktop:open-workspace-file-tab', (event, sessionId, filePath) => {
+  requireTrustedIpc(event);
+  return createWorkspaceFileTabInGroup(standaloneGroupFromEvent(event), sessionId, filePath);
+});
+ipcMain.handle('desktop:open-terminal-window', (event, sessionId) => {
+  requireTrustedIpc(event);
+  return createTerminalWindow(sessionId);
+});
+ipcMain.handle('desktop:get-standalone-tabs', (event) => {
+  requireTrustedIpc(event);
+  return getStandaloneTabsState(standaloneGroupFromEvent(event));
+});
+ipcMain.handle('desktop:activate-standalone-tab', (event, tabId) => {
+  requireTrustedIpc(event);
+  return activateStandaloneTab(standaloneGroupFromEvent(event), tabId);
+});
+ipcMain.handle('desktop:close-standalone-tab', (event, tabId) => {
+  requireTrustedIpc(event);
+  return closeStandaloneTab(standaloneGroupFromEvent(event), tabId);
+});
+ipcMain.handle('desktop:detach-standalone-tab', (event, tabId, screenPoint) => {
+  requireTrustedIpc(event);
+  return detachStandaloneTab(event, tabId, screenPoint);
+});
+ipcMain.handle('desktop:move-standalone-tab', (event, tabId, targetGroupId) => {
+  requireTrustedIpc(event);
+  return moveStandaloneTab(event, tabId, targetGroupId);
+});
 
 app.whenReady().then(async () => {
   if (process.platform === 'win32') {
     app.setAppUserModelId('works.pi-agent.desktop');
   }
+  setupContentSecurityPolicy();
   setupApplicationMenu();
   setupTray();
   setupAutoUpdater();

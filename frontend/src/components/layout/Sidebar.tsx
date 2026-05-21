@@ -23,13 +23,18 @@ import {
   GitBranch,
   Bot,
   CalendarClock,
+  ChevronDown,
+  ChevronRight,
   Moon,
+  Network,
   RadioTower,
   Terminal,
   Users,
   Wrench,
 } from 'lucide-react';
 import { cn } from '../shared/utils';
+
+const SIDEBAR_TOOLS_COLLAPSED_KEY = 'pi.sidebar.toolsCollapsed';
 
 export function Sidebar() {
   const { t } = useI18n();
@@ -55,6 +60,10 @@ export function Sidebar() {
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [channelStats, setChannelStats] = useState<{ total: number; enabled: number } | null>(null);
+  const [toolsCollapsed, setToolsCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(SIDEBAR_TOOLS_COLLAPSED_KEY) === 'true';
+  });
 
   // Group sessions by time
   const groups = useMemo(() => {
@@ -121,6 +130,10 @@ export function Sidebar() {
     };
   }, [loadAgents]);
 
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_TOOLS_COLLAPSED_KEY, String(toolsCollapsed));
+  }, [toolsCollapsed]);
+
   const handleNewSession = () => {
     void createNewSessionFromPicker();
   };
@@ -165,9 +178,9 @@ export function Sidebar() {
   };
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       {/* ClawX-style action rail */}
-      <div className="border-b border-pi-border/70 px-2 py-2">
+      <div className="shrink-0 border-b border-pi-border/70 px-2 py-2">
         <div className="space-y-1">
           <SidebarActionButton
             icon={Plus}
@@ -176,74 +189,97 @@ export function Sidebar() {
             primary
             onClick={handleNewSession}
           />
-          <SidebarActionButton
-            icon={Bot}
-            label={t('nav.model')}
-            active={activeView === 'settings' && settingsTab === 'model'}
-            badge={availableModels.length > 0 ? String(availableModels.length) : undefined}
-            onClick={() => openSettingsTab('model')}
-          />
-          <SidebarActionButton
-            icon={RadioTower}
-            label={t('nav.channels')}
-            active={activeView === 'settings' && settingsTab === 'channels'}
-            badge={channelStats ? `${channelStats.enabled}/${channelStats.total}` : undefined}
-            onClick={() => openSettingsTab('channels')}
-          />
-          <SidebarActionButton
-            icon={Users}
-            label={t('nav.agents')}
-            active={activeView === 'agents'}
-            badge={erroredAgents > 0 ? String(erroredAgents) : runningAgents > 0 ? String(runningAgents) : String(agents.length + 1)}
-            badgeTone={erroredAgents > 0 ? 'error' : runningAgents > 0 ? 'active' : undefined}
-            onClick={() => setActiveView('agents')}
-          />
-          <SidebarActionButton
-            icon={Wrench}
-            label={t('nav.skills')}
-            active={activeView === 'skills'}
-            badge={skills.length > 0 ? `${enabledSkills}/${skills.length}` : undefined}
-            onClick={() => setActiveView('skills')}
-          />
-          <SidebarActionButton
-            icon={CalendarClock}
-            label={t('nav.scheduledTasks')}
-            active={activeView === 'tasks'}
-            badge={tasks.length > 0 ? `${enabledTasks}/${tasks.length}` : undefined}
-            onClick={() => setActiveView('tasks')}
-          />
-          <SidebarActionButton
-            icon={Moon}
-            label={t('nav.themes')}
-            active={activeView === 'themes'}
-            onClick={() => setActiveView('themes')}
-          />
-          <SidebarActionButton
-            icon={Package}
-            label={t('nav.packages')}
-            active={activeView === 'packages'}
-            onClick={() => setActiveView('packages')}
-          />
-          <SidebarActionButton
-            icon={Puzzle}
-            label={t('nav.extensions')}
-            active={activeView === 'extensions'}
-            onClick={() => setActiveView('extensions')}
-          />
-          <SidebarActionButton
-            icon={Terminal}
-            label={t('nav.terminal')}
-            active={rightPanelType === 'terminal'}
-            onClick={() => {
-              setActiveView('chat');
-              setRightPanel(rightPanelType === 'terminal' ? null : 'terminal');
-            }}
-          />
+          <button
+            type="button"
+            className="flex h-7 w-full items-center gap-2 rounded-lg border border-transparent px-2 text-left text-[11px] font-semibold text-pi-dim transition-colors hover:border-pi-border/60 hover:bg-pi-bg-hover/70 hover:text-pi-text"
+            onClick={() => setToolsCollapsed((value) => !value)}
+            aria-expanded={!toolsCollapsed}
+            title={toolsCollapsed ? t('sidebar.expandTools') : t('sidebar.collapseTools')}
+          >
+            {toolsCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+            <span className="min-w-0 flex-1 truncate">{t('sidebar.tools')}</span>
+            <span className="rounded-md border border-pi-border/60 bg-pi-bg-tertiary/70 px-1.5 py-0.5 text-[9px] leading-none text-pi-dim">
+              10
+            </span>
+          </button>
+          {!toolsCollapsed && (
+            <div className="space-y-1">
+              <SidebarActionButton
+                icon={Bot}
+                label={t('nav.model')}
+                active={activeView === 'settings' && settingsTab === 'model'}
+                badge={availableModels.length > 0 ? String(availableModels.length) : undefined}
+                onClick={() => openSettingsTab('model')}
+              />
+              <SidebarActionButton
+                icon={RadioTower}
+                label={t('nav.channels')}
+                active={activeView === 'settings' && settingsTab === 'channels'}
+                badge={channelStats ? `${channelStats.enabled}/${channelStats.total}` : undefined}
+                onClick={() => openSettingsTab('channels')}
+              />
+              <SidebarActionButton
+                icon={Users}
+                label={t('nav.agents')}
+                active={activeView === 'agents'}
+                badge={erroredAgents > 0 ? String(erroredAgents) : runningAgents > 0 ? String(runningAgents) : String(agents.length + 1)}
+                badgeTone={erroredAgents > 0 ? 'error' : runningAgents > 0 ? 'active' : undefined}
+                onClick={() => setActiveView('agents')}
+              />
+              <SidebarActionButton
+                icon={Network}
+                label={t('nav.agentRooms')}
+                active={activeView === 'agentRooms'}
+                onClick={() => setActiveView('agentRooms')}
+              />
+              <SidebarActionButton
+                icon={Wrench}
+                label={t('nav.skills')}
+                active={activeView === 'skills'}
+                badge={skills.length > 0 ? `${enabledSkills}/${skills.length}` : undefined}
+                onClick={() => setActiveView('skills')}
+              />
+              <SidebarActionButton
+                icon={CalendarClock}
+                label={t('nav.scheduledTasks')}
+                active={activeView === 'tasks'}
+                badge={tasks.length > 0 ? `${enabledTasks}/${tasks.length}` : undefined}
+                onClick={() => setActiveView('tasks')}
+              />
+              <SidebarActionButton
+                icon={Moon}
+                label={t('nav.themes')}
+                active={activeView === 'themes'}
+                onClick={() => setActiveView('themes')}
+              />
+              <SidebarActionButton
+                icon={Package}
+                label={t('nav.packages')}
+                active={activeView === 'packages'}
+                onClick={() => setActiveView('packages')}
+              />
+              <SidebarActionButton
+                icon={Puzzle}
+                label={t('nav.extensions')}
+                active={activeView === 'extensions'}
+                onClick={() => setActiveView('extensions')}
+              />
+              <SidebarActionButton
+                icon={Terminal}
+                label={t('nav.terminal')}
+                active={rightPanelType === 'terminal'}
+                onClick={() => {
+                  setActiveView('chat');
+                  setRightPanel(rightPanelType === 'terminal' ? null : 'terminal');
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
 
       {/* Search */}
-      <div className="px-3 py-2">
+      <div className="shrink-0 px-3 py-2">
         <div className="relative">
           <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-pi-dim" />
           <input
@@ -259,7 +295,7 @@ export function Sidebar() {
 
       {/* Project Filter */}
       {projects.length > 1 && (
-        <div className="px-3 pb-2">
+        <div className="shrink-0 px-3 pb-2">
           <select
             value={projectFilter ?? ''}
             onChange={(e) => setProjectFilter(e.target.value || null)}
@@ -275,7 +311,7 @@ export function Sidebar() {
       )}
 
       {/* Session List */}
-      <div className="flex-1 overflow-y-auto px-2 py-1">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
         {groups.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-pi-dim gap-3 px-4">
             <MessageSquare size={32} strokeWidth={1} />
@@ -366,7 +402,7 @@ export function Sidebar() {
       </div>
 
       {/* Bottom Navigation */}
-      <div className="space-y-1 border-t border-pi-border/70 p-2">
+      <div className="shrink-0 space-y-1 border-t border-pi-border/70 p-2">
         <SidebarActionButton
           icon={Settings}
           label={t('nav.settings')}

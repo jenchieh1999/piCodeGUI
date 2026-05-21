@@ -4,21 +4,34 @@ import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { WelcomeScreen } from './WelcomeScreen';
 import { piApi } from '../../api/client';
-import { useEffect } from 'react';
-import type { ChatMessage } from '../../types';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import type { ChatMessage, ImageAttachment } from '../../types';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { TerminalPanel } from '../layout/RightPanel';
+import { cn } from '../shared/utils';
+import { useI18n } from '../../lib/i18n';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+const TERMINAL_DOCK_MIN_HEIGHT = 140;
+const TERMINAL_DOCK_MAX_HEIGHT = 520;
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 export function ChatView() {
+  const { t } = useI18n();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const messages = useChatStore((s) => (activeSessionId ? s.messagesBySession[activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
   const isStreaming = useChatStore((s) => s.isStreaming);
   const activeSession = useChatStore((s) => s.sessions.find((ss) => ss.id === activeSessionId));
   const addUserMessage = useChatStore((s) => s.addUserMessage);
   const addToast = useUIStore((s) => s.addToast);
+  const terminalDockOpen = useUIStore((s) => s.terminalDockOpen);
+  const terminalDockHeight = useUIStore((s) => s.terminalDockHeight);
+  const setTerminalDockHeight = useUIStore((s) => s.setTerminalDockHeight);
   const chatBackgroundImage = useSettingsStore((s) => s.chatBackgroundImage);
   const chatBackgroundDim = useSettingsStore((s) => s.chatBackgroundDim);
+  const [isResizingTerminalDock, setIsResizingTerminalDock] = useState(false);
+  const resizeStateRef = useRef({ startY: 0, startHeight: terminalDockHeight });
 
   // Reset streaming state when session changes
   useEffect(() => {
@@ -27,10 +40,9 @@ export function ChatView() {
     }
   }, [activeSessionId]);
 
-  const handleSend = (text: string, images?: Array<{ data: string; mimeType: string }>, displayText?: string): boolean => {
+  const handleSend = (text: string, images?: ImageAttachment[], displayText?: string): boolean => {
     if (!activeSessionId) return false;
     const visibleText = displayText ?? text;
-    const imageNote = images?.length ? `${visibleText ? '\n\n' : ''}[${images.length} image attachment${images.length > 1 ? 's' : ''}]` : '';
     const sent = piApi.send(isStreaming
       ? {
           type: 'follow_up',
@@ -52,7 +64,7 @@ export function ChatView() {
       });
       return false;
     }
-    addUserMessage(activeSessionId, `${visibleText}${imageNote}`);
+    addUserMessage(activeSessionId, visibleText, images);
     return true;
   };
 
@@ -68,6 +80,43 @@ export function ChatView() {
       useChatStore.getState().stopStreaming(activeSessionId);
     }
   };
+
+  const startTerminalDockResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    resizeStateRef.current = { startY: event.clientY, startHeight: terminalDockHeight };
+    setIsResizingTerminalDock(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [terminalDockHeight]);
+
+  useEffect(() => {
+    if (!isResizingTerminalDock) return;
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const { startY, startHeight } = resizeStateRef.current;
+      const viewportLimit = Math.max(TERMINAL_DOCK_MIN_HEIGHT, window.innerHeight - 260);
+      const maxHeight = Math.min(TERMINAL_DOCK_MAX_HEIGHT, viewportLimit);
+      setTerminalDockHeight(clamp(startHeight + startY - event.clientY, TERMINAL_DOCK_MIN_HEIGHT, maxHeight));
+    };
+
+    const stopResize = () => setIsResizingTerminalDock(false);
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+    };
+  }, [isResizingTerminalDock, setTerminalDockHeight]);
 
   if (!activeSession || !activeSessionId) {
     return (
@@ -91,7 +140,7 @@ export function ChatView() {
               onSend={handleSend}
             />
           ) : (
-            <MessageList messages={messages} />
+            <MessageList sessionId={activeSessionId} messages={messages} />
           )}
         </div>
       </div>
@@ -103,6 +152,29 @@ export function ChatView() {
         isStreaming={isStreaming}
         sessionId={activeSessionId!}
       />
+
+      {terminalDockOpen && (
+        <div className="flex flex-shrink-0 flex-col border-t border-pi-border bg-pi-bg" style={{ height: terminalDockHeight }}>
+          <div
+            role="separator"
+            aria-label={t('rightPanel.terminal.resizeDock')}
+            aria-orientation="horizontal"
+            tabIndex={0}
+            title={t('rightPanel.terminal.resizeDockHint')}
+            onPointerDown={startTerminalDockResize}
+            className={cn(
+              'group relative z-10 flex h-2 flex-shrink-0 cursor-row-resize touch-none items-center justify-center outline-none',
+              'before:absolute before:inset-x-3 before:top-1/2 before:h-px before:-translate-y-1/2 before:rounded-full before:bg-pi-border/80 before:transition-colors',
+              'after:absolute after:left-1/2 after:top-1/2 after:h-1 after:w-10 after:-translate-x-1/2 after:-translate-y-1/2 after:rounded-full after:bg-transparent after:transition-colors',
+              'hover:before:bg-pi-accent/70 hover:after:bg-pi-accent/25 focus-visible:bg-pi-accent/10 focus-visible:before:bg-pi-accent focus-visible:after:bg-pi-accent/35',
+              isResizingTerminalDock && 'bg-pi-accent/10 before:bg-pi-accent after:bg-pi-accent/40'
+            )}
+          />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <TerminalPanel sessionId={activeSessionId} compact />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

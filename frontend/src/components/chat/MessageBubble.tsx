@@ -7,7 +7,7 @@ import { cn } from '../shared/utils';
 import { piApi } from '../../api/client';
 import { useI18n } from '../../lib/i18n';
 import { useUIStore } from '../../stores/uiStore';
-import { User, Bot, Copy, Check, GitFork, Loader2 } from 'lucide-react';
+import { User, Bot, Copy, Check, GitFork, Loader2, FileText } from 'lucide-react';
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -108,6 +108,7 @@ export function MessageBubble({ message, showThinking }: MessageBubbleProps) {
         <div className="pi-selectable space-y-2 select-text cursor-text">
           {message.content.map((block, idx) => {
             if (block.type === 'text' && block.text) {
+              const userContent = isUser ? splitUserWorkspaceReferences(block.text) : null;
               return (
                 <div
                   key={idx}
@@ -118,10 +119,44 @@ export function MessageBubble({ message, showThinking }: MessageBubbleProps) {
                 >
                   {isAssistant ? (
                     <MarkdownRenderer content={block.text} />
+                  ) : userContent?.references.length ? (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        {userContent.references.map((reference) => (
+                          <WorkspaceReferenceCard key={`${reference.path}:${reference.range ?? ''}`} reference={reference} />
+                        ))}
+                      </div>
+                      {userContent.text && <p className="whitespace-pre-wrap">{userContent.text}</p>}
+                    </div>
                   ) : (
                     <p className="whitespace-pre-wrap">{block.text}</p>
                   )}
                 </div>
+              );
+            }
+
+            if (block.type === 'image' && block.image) {
+              const image = block.image;
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => openImagePreview(image)}
+                  className="group/image block max-w-full cursor-zoom-in overflow-hidden rounded-lg border border-pi-border bg-pi-bg-tertiary/70 text-left shadow-sm transition-colors hover:border-pi-accent/60"
+                  title={image.fileName ?? image.mimeType}
+                >
+                  <img
+                    src={imageDataUrl(image)}
+                    alt={image.fileName ?? 'image attachment'}
+                    className="max-h-[360px] max-w-full object-contain"
+                    loading="lazy"
+                  />
+                  {(image.fileName || image.mimeType) && (
+                    <div className="border-t border-pi-border/70 px-2 py-1 text-[10px] text-pi-dim">
+                      <span className="line-clamp-1">{image.fileName ?? image.mimeType}</span>
+                    </div>
+                  )}
+                </button>
               );
             }
 
@@ -195,4 +230,109 @@ export function MessageBubble({ message, showThinking }: MessageBubbleProps) {
       </div>
     </div>
   );
+}
+
+function imageDataUrl(image: { data: string; mimeType: string }): string {
+  if (image.data.startsWith('data:')) return image.data;
+  return `data:${image.mimeType};base64,${image.data}`;
+}
+
+function openImagePreview(image: { data: string; mimeType: string }): void {
+  window.open(imageDataUrl(image), '_blank', 'noopener,noreferrer');
+}
+
+interface WorkspaceDisplayReference {
+  path: string;
+  name: string;
+  directory: string;
+  extension: string;
+  range?: string;
+}
+
+function WorkspaceReferenceCard({ reference }: { reference: WorkspaceDisplayReference }) {
+  return (
+    <div
+      className="inline-flex max-w-full select-text items-center gap-2 rounded-2xl border border-pi-border/70 bg-pi-bg-secondary/85 px-3 py-2 shadow-sm backdrop-blur-xl"
+      title={reference.range ? `${reference.path}${reference.range}` : reference.path}
+    >
+      <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-pi-accent/20 bg-pi-accent/10 text-pi-accent shadow-inner">
+        <FileText size={15} />
+      </span>
+      <span className="min-w-0 leading-tight">
+        <span className="block truncate text-xs font-semibold text-pi-text">{reference.name}</span>
+        <span className="block truncate text-[10px] text-pi-dim">
+          {reference.directory || reference.path}
+          {reference.range && <span className="font-mono"> {reference.range}</span>}
+        </span>
+      </span>
+      {reference.extension && (
+        <span className="ml-1 flex-shrink-0 rounded-full border border-pi-border/70 bg-pi-bg-tertiary px-2 py-0.5 text-[9px] font-semibold uppercase text-pi-muted">
+          {reference.extension}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function splitUserWorkspaceReferences(text: string): { references: WorkspaceDisplayReference[]; text: string } {
+  const normalized = text.replace(/\r\n/g, '\n');
+  const match = normalized.match(/^([\s\S]*?)(?:\n{2,}([\s\S]*))?$/);
+  const firstParagraph = (match?.[1] ?? '').trim();
+  if (!firstParagraph.startsWith('@')) return { references: [], text };
+
+  const references = parseReferenceParagraph(firstParagraph);
+  if (references.length === 0) return { references: [], text };
+
+  return {
+    references,
+    text: (match?.[2] ?? '').trimStart(),
+  };
+}
+
+function parseReferenceParagraph(value: string): WorkspaceDisplayReference[] {
+  const normalized = value.trim();
+  const referenceStarts = normalized.match(/(^|\s)@/g) ?? [];
+  const tokens = referenceStarts.length <= 1
+    ? [normalized]
+    : normalized.split(/\s+(?=@)/).map((token) => token.trim()).filter(Boolean);
+  if (tokens.length === 0 || tokens.some((token) => !token.startsWith('@'))) return [];
+
+  const references = tokens.map((token) => parseWorkspaceReferenceToken(token.slice(1)));
+  if (references.some((reference) => !reference)) return [];
+  return references as WorkspaceDisplayReference[];
+}
+
+function parseWorkspaceReferenceToken(value: string): WorkspaceDisplayReference | null {
+  const rangeMatch = value.match(/(:L\d+(?:-L\d+)?)$/);
+  const range = rangeMatch?.[1];
+  const path = (range ? value.slice(0, -range.length) : value).replace(/\\/g, '/').trim();
+  if (/\s/.test(path) && !/\.[a-zA-Z0-9]{1,12}$/.test(path)) return null;
+  if (!looksLikeWorkspaceReference(path)) return null;
+
+  const name = basename(path);
+  const directory = dirname(path);
+  const extension = extensionFromName(name);
+  return { path, name, directory, extension, range };
+}
+
+function looksLikeWorkspaceReference(path: string): boolean {
+  if (!path || /[\r\n]/.test(path)) return false;
+  return path.includes('/') || path.startsWith('attachment/') || /\.[a-zA-Z0-9]{1,12}$/.test(path);
+}
+
+function basename(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  return normalized.split('/').filter(Boolean).pop() ?? normalized;
+}
+
+function dirname(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  const parts = normalized.split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
+function extensionFromName(name: string): string {
+  const match = name.match(/\.([a-zA-Z0-9]{1,12})$/);
+  return match?.[1] ?? '';
 }

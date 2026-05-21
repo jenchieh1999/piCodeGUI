@@ -7,3 +7,4 @@ export { useSettingsStore } from './settingsStore';
 export { useConnectionStore } from './connectionStore';
 export { useTaskStore } from './taskStore';
 export { useAgentStore } from './agentStore';
+export { useAgentRoomStore } from './agentRoomStore';

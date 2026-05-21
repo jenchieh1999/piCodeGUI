@@ -14,6 +14,7 @@ async function main() {
     format: 'cjs',
     outfile: './dist/server.cjs',
     external: [
+      '@earendil-works/pi-ai',
       '@earendil-works/pi-coding-agent',
       '@homebridge/node-pty-prebuilt-multiarch',
       '@mariozechner/clipboard',

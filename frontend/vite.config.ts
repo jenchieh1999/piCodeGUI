@@ -33,6 +33,7 @@ export default defineConfig({
           if (id.includes('zustand')) return 'vendor-state';
           if (id.includes('lucide-react')) return 'vendor-icons';
           if (id.includes('@xterm')) return 'vendor-terminal';
+          if (id.includes('@codemirror') || id.includes('@lezer')) return 'vendor-codemirror';
           if (id.includes('@radix-ui')) return 'vendor-radix';
           if (id.includes('react-virtuoso')) return 'vendor-virtuoso';
           if (id.includes('marked') || id.includes('dompurify')) return 'vendor-markdown';

@@ -147,22 +147,20 @@ function normalizeLanguage(lang: string): LanguageId | null {
   if (token in languageLoaders) return token as LanguageId;
   return languageAliases[token] ?? null;
 }
-// Configure marked with custom code renderer
-const renderer = new marked.Renderer();
-renderer.code = function ({ text, lang }: { text: string; lang?: string }): string {
-  // Return a placeholder that we'll replace after async highlighting
-  const id = `code-${Math.random().toString(36).slice(2)}`;
-  codeBlocks.set(id, { text, lang: lang ?? '' });
-  return `<pre><code data-code-id="${id}">${escapeHtml(text)}</code></pre>`;
-};
 
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-  renderer,
-});
+export async function highlightCodeToHtml(codeText: string, lang: string): Promise<string> {
+  const highlighter = await getHighlighter();
+  const normalizedLang = normalizeLanguage(lang);
+  if (normalizedLang && await ensureLanguage(highlighter, normalizedLang)) {
+    try {
+      return highlighter.codeToHtml(codeText, { lang: normalizedLang, theme: 'dark-plus' });
+    } catch {
+      return `<pre><code>${escapeHtml(codeText)}</code></pre>`;
+    }
+  }
 
-const codeBlocks = new Map<string, { text: string; lang: string }>();
+  return `<pre><code>${escapeHtml(codeText)}</code></pre>`;
+}
 
 interface MarkdownRendererProps {
   content: string;
@@ -182,28 +180,28 @@ export function MarkdownRenderer({ content, onRendered }: MarkdownRendererProps)
 
     async function render() {
       try {
-        codeBlocks.clear();
+        const codeBlocks = new Map<string, { text: string; lang: string }>();
+        const renderer = new marked.Renderer();
+        renderer.code = function ({ text, lang }: { text: string; lang?: string }): string {
+          const id = `code-${Math.random().toString(36).slice(2)}`;
+          codeBlocks.set(id, { text, lang: lang ?? '' });
+          return `<pre><code data-code-id="${id}">${escapeHtml(text)}</code></pre>`;
+        };
         
-        const rawHtml = await marked.parse(content, { async: true });
+        const rawHtml = await marked.parse(content, {
+          async: true,
+          breaks: true,
+          gfm: true,
+          renderer,
+        });
         
         if (cancelled) return;
         
-        // Post-process code blocks with shiki highlighting
-        const highlighter = await getHighlighter();
+        // Post-process code blocks with shiki highlighting.
         let result = rawHtml;
         
         for (const [id, { text: codeText, lang }] of codeBlocks) {
-          let highlighted: string;
-          const normalizedLang = normalizeLanguage(lang);
-          if (normalizedLang && await ensureLanguage(highlighter, normalizedLang)) {
-            try {
-              highlighted = highlighter.codeToHtml(codeText, { lang: normalizedLang, theme: 'dark-plus' });
-            } catch {
-              highlighted = `<pre><code>${escapeHtml(codeText)}</code></pre>`;
-            }
-          } else {
-            highlighted = `<pre><code>${escapeHtml(codeText)}</code></pre>`;
-          }
+          const highlighted = await highlightCodeToHtml(codeText, lang);
           result = result.replace(
             `<pre><code data-code-id="${id}">${escapeHtml(codeText)}</code></pre>`,
             highlighted

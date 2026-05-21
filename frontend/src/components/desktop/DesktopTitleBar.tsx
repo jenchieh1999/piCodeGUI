@@ -35,13 +35,11 @@ interface TitleMenuItem {
 interface DesktopTitleBarProps {
   title?: string;
   showMenus?: boolean;
-  showServerStatus?: boolean;
 }
 
 export function DesktopTitleBar({
   title = 'Pi Agent Desktop',
   showMenus = true,
-  showServerStatus = true,
 }: DesktopTitleBarProps) {
   const { language } = useI18n();
   const text = TITLEBAR_TEXT[language] ?? TITLEBAR_TEXT.en;
@@ -168,7 +166,6 @@ export function DesktopTitleBar({
     },
   ];
 
-  const serverReady = Boolean(serverInfo?.serverUrl && !serverInfo.startupError);
   const toggleRightSidebar = () => setRightPanel(rightPanelType ? null : lastRightPanelType);
 
   return (
@@ -234,15 +231,6 @@ export function DesktopTitleBar({
             onClick={toggleRightSidebar}
           />
         </div>
-      )}
-
-      {showServerStatus && (
-      <div className="pi-glass-control app-region-no-drag mr-2 hidden h-6 items-center gap-1 rounded-full px-2.5 text-[10px] text-pi-titlebar-text/80 md:flex">
-        <span className={cn('h-1.5 w-1.5 rounded-full', serverReady ? 'bg-pi-success' : 'bg-pi-warning')} />
-        <span className="max-w-[220px] truncate">
-          {serverReady ? text.serverReady : text.serverUnavailable}
-        </span>
-      </div>
       )}
 
       <div className="app-region-no-drag z-50 flex h-full items-center pr-1">
