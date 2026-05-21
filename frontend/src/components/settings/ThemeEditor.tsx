@@ -4,16 +4,20 @@ import { useUIStore } from '../../stores/uiStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { piApi } from '../../api/client';
 import { useI18n } from '../../lib/i18n';
-import { listRuntimeThemes, resolveRuntimeTheme, themeDisplayName } from '../../lib/runtimeSettings';
-import { ArrowLeft, Lock, Palette, Plus, Download, Trash2, Upload } from 'lucide-react';
+import { groupRuntimeThemesBySeries, listRuntimeThemes, resolveRuntimeTheme, themeDisplayName } from '../../lib/runtimeSettings';
+import { ArrowLeft, Info, Palette, Plus, Download, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { cn } from '../shared/utils';
 
 export function ThemeEditor() {
   const themes = useExtensionStore((s) => s.themes);
   const customThemes = useExtensionStore((s) => s.customThemes);
+  const hiddenThemeNames = useExtensionStore((s) => s.hiddenThemeNames);
   const createCustomTheme = useExtensionStore((s) => s.createCustomTheme);
+  const upsertCustomThemeColor = useExtensionStore((s) => s.upsertCustomThemeColor);
   const updateCustomThemeColor = useExtensionStore((s) => s.updateCustomThemeColor);
   const deleteCustomTheme = useExtensionStore((s) => s.deleteCustomTheme);
+  const hideThemeName = useExtensionStore((s) => s.hideThemeName);
+  const resetThemeState = useExtensionStore((s) => s.resetThemeState);
   const setActiveView = useUIStore((s) => s.setActiveView);
   const addToast = useUIStore((s) => s.addToast);
   const activeThemeName = useSettingsStore((s) => s.theme);
@@ -22,16 +26,20 @@ export function ThemeEditor() {
   const [isCreatingTheme, setIsCreatingTheme] = useState(false);
   const [newThemeName, setNewThemeName] = useState('');
   const allThemes = [...themes, ...customThemes];
-  const runtimeThemes = listRuntimeThemes(allThemes);
+  const baseThemeNames = new Set(listRuntimeThemes(themes).map((theme) => theme.name));
+  const allRuntimeThemes = listRuntimeThemes(allThemes);
+  const runtimeThemes = allRuntimeThemes.filter((theme) => !hiddenThemeNames.includes(theme.name));
+  const themeGroups = groupRuntimeThemesBySeries(runtimeThemes);
   const activeTheme = resolveRuntimeTheme(activeThemeName, allThemes);
   const customThemeNames = new Set(customThemes.map((theme) => theme.name));
-  const canEditActiveTheme = customThemeNames.has(activeThemeName);
+  const activeThemeIsBase = baseThemeNames.has(activeTheme.name);
+  const activeThemeIsCustom = customThemeNames.has(activeTheme.name);
 
   const createTheme = () => {
     const name = newThemeName.trim();
     if (!name) return;
 
-    if (runtimeThemes.some((theme) => theme.name === name)) {
+    if (allRuntimeThemes.some((theme) => theme.name === name)) {
       addToast({ type: 'warning', message: t('themeEditor.duplicateName', { name }) });
       return;
     }
@@ -49,17 +57,50 @@ export function ThemeEditor() {
   };
 
   const startCreateTheme = () => {
-    setNewThemeName(uniqueThemeName(t('themeEditor.newTheme'), runtimeThemes.map((theme) => theme.name)));
+    setNewThemeName(uniqueThemeName(t('themeEditor.newTheme'), allRuntimeThemes.map((theme) => theme.name)));
     setIsCreatingTheme(true);
   };
 
   const deleteTheme = (name: string) => {
-    deleteCustomTheme(name);
-    if (activeThemeName === name) {
-      updateSetting('theme', 'dark');
-      piApi.send({ type: 'theme_set', name: 'dark' });
+    if (runtimeThemes.length <= 1) {
+      addToast({ type: 'warning', message: t('themeEditor.deleteLastThemeBlocked') });
+      return;
     }
-    addToast({ type: 'success', message: `Deleted theme ${name}` });
+
+    if (!confirm(t('themeEditor.deleteConfirm', { name: themeDisplayName(name) }))) return;
+
+    const isBaseTheme = baseThemeNames.has(name);
+    if (isBaseTheme) {
+      hideThemeName(name);
+    } else {
+      deleteCustomTheme(name);
+    }
+
+    if (activeThemeName === name) {
+      const fallbackTheme = runtimeThemes.find((theme) => theme.name !== name && theme.name === 'dark')
+        ?? runtimeThemes.find((theme) => theme.name !== name);
+      const fallbackName = fallbackTheme?.name ?? 'dark';
+      updateSetting('theme', fallbackName);
+      piApi.send({ type: 'theme_set', name: fallbackName });
+    }
+    addToast({ type: 'success', message: t('themeEditor.deleted', { name }) });
+  };
+
+  const resetThemes = () => {
+    if (!confirm(t('themeEditor.resetConfirm'))) return;
+    resetThemeState();
+    updateSetting('theme', 'dark');
+    piApi.send({ type: 'theme_set', name: 'dark' });
+    addToast({ type: 'success', message: t('themeEditor.resetDone') });
+  };
+
+  const updateThemeColor = (token: string, color: string) => {
+    if (activeThemeIsCustom) {
+      updateCustomThemeColor(activeTheme.name, token, color);
+    } else {
+      upsertCustomThemeColor(activeTheme.name, activeTheme, token, color);
+      addToast({ type: 'info', message: t('themeEditor.overrideCreated', { name: activeTheme.name }) });
+    }
   };
 
   // Hardcoded theme token categories for display
@@ -102,6 +143,13 @@ export function ThemeEditor() {
         <h1 className="text-sm font-display font-semibold text-pi-text">{t('themeEditor.title')}</h1>
         <div className="flex-1" />
         <button
+          onClick={resetThemes}
+          className="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover transition-colors border border-pi-border"
+        >
+          <RotateCcw size={12} />
+          {t('themeEditor.resetThemes')}
+        </button>
+        <button
           className="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover transition-colors border border-pi-border"
         >
           <Upload size={12} />
@@ -117,48 +165,63 @@ export function ThemeEditor() {
 
       <div className="flex-1 overflow-y-auto p-6">
         {/* Theme Swatches */}
-        <div className="flex flex-wrap gap-2 mb-6">
-          {runtimeThemes.map((theme) => {
-            const isCustom = customThemeNames.has(theme.name);
-            const isActive = theme.name === activeThemeName;
+        <div className="mb-6 space-y-4">
+          {(['dark', 'light'] as const).map((series) => {
+            const seriesThemes = themeGroups[series];
+            if (seriesThemes.length === 0) return null;
 
             return (
-              <div
-                key={theme.name}
-                className={cn(
-                  'flex items-center overflow-hidden rounded-md border text-xs font-medium transition-colors',
-                  isActive
-                    ? 'border-pi-accent bg-pi-accent/10 text-pi-accent'
-                    : 'border-pi-border text-pi-muted hover:text-pi-text hover:border-pi-muted'
-                )}
-              >
-                <button
-                  onClick={() => {
-                    updateSetting('theme', theme.name);
-                    piApi.send({ type: 'theme_set', name: theme.name });
-                    addToast({ type: 'success', message: t('themeEditor.toastSet', { name: theme.name }) });
-                  }}
-                  className="flex h-8 items-center gap-1.5 px-3"
-                  title={theme.name}
-                >
-                  <Palette size={12} />
-                  {themeDisplayName(theme.name)}
-                  {isCustom && (
-                    <span className="rounded bg-pi-accent/10 px-1.5 py-0.5 text-[9px] text-pi-accent">
-                      {t('themeEditor.customBadge')}
-                    </span>
-                  )}
-                </button>
-                {isCustom && (
-                  <button
-                    onClick={() => deleteTheme(theme.name)}
-                    className="flex h-8 w-8 items-center justify-center border-l border-pi-border text-pi-dim hover:bg-pi-error/10 hover:text-pi-error transition-colors"
-                    title={t('themeEditor.deleteTheme')}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                )}
-              </div>
+              <section key={series}>
+                <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-pi-dim">
+                  {t(`themeEditor.series.${series}`)}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {seriesThemes.map((theme) => {
+                    const isCustom = customThemeNames.has(theme.name);
+                    const isBaseTheme = baseThemeNames.has(theme.name);
+                    const isActive = theme.name === activeThemeName;
+
+                    return (
+                      <div
+                        key={theme.name}
+                        className={cn(
+                          'flex items-center overflow-hidden rounded-md border text-xs font-medium transition-colors',
+                          isActive
+                            ? 'border-pi-accent bg-pi-accent/10 text-pi-accent'
+                            : 'border-pi-border text-pi-muted hover:text-pi-text hover:border-pi-muted'
+                        )}
+                      >
+                        <button
+                          onClick={() => {
+                            updateSetting('theme', theme.name);
+                            piApi.send({ type: 'theme_set', name: theme.name });
+                            addToast({ type: 'success', message: t('themeEditor.toastSet', { name: theme.name }) });
+                          }}
+                          className="flex h-8 items-center gap-1.5 px-3"
+                          title={theme.name}
+                        >
+                          <Palette size={12} />
+                          {themeDisplayName(theme.name)}
+                          <span className="rounded bg-pi-bg-tertiary px-1.5 py-0.5 text-[9px] text-pi-dim">
+                            {isBaseTheme
+                              ? isCustom
+                                ? t('themeEditor.modifiedBadge')
+                                : t('themeEditor.builtinBadge')
+                              : t('themeEditor.customBadge')}
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => deleteTheme(theme.name)}
+                          className="flex h-8 w-8 items-center justify-center border-l border-pi-border text-pi-dim hover:bg-pi-error/10 hover:text-pi-error transition-colors"
+                          title={t('themeEditor.deleteTheme')}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             );
           })}
           {isCreatingTheme ? (
@@ -199,10 +262,10 @@ export function ThemeEditor() {
           )}
         </div>
 
-        {!canEditActiveTheme && (
+        {activeThemeIsBase && (
           <div className="mb-5 flex items-center gap-2 rounded-md border border-pi-border bg-pi-bg-secondary px-3 py-2 text-xs text-pi-dim">
-            <Lock size={13} />
-            {t('themeEditor.readonly')}
+            <Info size={13} />
+            {t(activeThemeIsCustom ? 'themeEditor.modifiedHint' : 'themeEditor.editableBuiltinHint')}
           </div>
         )}
 
@@ -222,18 +285,15 @@ export function ThemeEditor() {
                       key={token}
                       className={cn(
                         'flex items-center gap-2 px-2 py-1.5 rounded-md bg-pi-bg-tertiary border border-pi-border group transition-colors',
-                        canEditActiveTheme
-                          ? 'hover:border-pi-accent/30 cursor-pointer'
-                          : 'cursor-not-allowed opacity-70'
+                        'hover:border-pi-accent/30 cursor-pointer'
                       )}
-                      title={canEditActiveTheme ? token : t('themeEditor.readonly')}
+                      title={token}
                     >
                       <input
                         type="color"
                         value={toColorInputValue(color)}
-                        disabled={!canEditActiveTheme}
-                        onChange={(event) => updateCustomThemeColor(activeTheme.name, token, event.target.value)}
-                        className="h-5 w-5 flex-shrink-0 cursor-pointer rounded border border-pi-border bg-transparent p-0 disabled:cursor-not-allowed"
+                        onChange={(event) => updateThemeColor(token, event.target.value)}
+                        className="h-5 w-5 flex-shrink-0 cursor-pointer rounded border border-pi-border bg-transparent p-0"
                       />
                       <span className="text-[10px] font-mono text-pi-dim truncate group-hover:text-pi-text transition-colors">
                         {token}

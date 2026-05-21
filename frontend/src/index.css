@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@500;600;700&display=swap');
-
 @import "tailwindcss";
 
 @theme inline {
@@ -67,26 +65,27 @@
 /* Font families */
 :root {
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-mono: 'SF Mono', 'SFMono-Regular', ui-monospace, 'Cascadia Code', 'Cascadia Mono', Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --font-code-editor: 'SF Mono', 'SFMono-Regular', ui-monospace, 'Cascadia Code', 'Cascadia Mono', Menlo, Monaco, Consolas, var(--font-sans), 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
   --font-display: 'Manrope', var(--font-sans);
 
-  /* Pi theme colors - dark default (mapped from pi's 51 tokens) */
-  --pi-accent: #00aaff;
-  --pi-border: #3a3a3e;
-  --pi-border-accent: #00aaff;
-  --pi-border-muted: #2a2a2e;
-  --pi-success: #00cc66;
-  --pi-error: #ff4444;
-  --pi-warning: #ffaa00;
-  --pi-muted: #888892;
-  --pi-dim: #55555a;
-  --pi-text: #e0e0e8;
-  --pi-thinking-text: #a0a0b0;
+  /* Pi theme colors - Palette Nocturne default (mapped from pi's 51 tokens) */
+  --pi-accent: #8fd56b;
+  --pi-border: #32444b;
+  --pi-border-accent: #8fd56b;
+  --pi-border-muted: #223138;
+  --pi-success: #8fd56b;
+  --pi-error: #dd6a86;
+  --pi-warning: #e6c36a;
+  --pi-muted: #9fb3b1;
+  --pi-dim: #708583;
+  --pi-text: #edf5f2;
+  --pi-thinking-text: #b8c9c6;
 
-  --pi-bg: #1a1a1e;
-  --pi-bg-secondary: #1e1e24;
-  --pi-bg-tertiary: #24242a;
-  --pi-bg-hover: #2a2a32;
+  --pi-bg: #0b1012;
+  --pi-bg-secondary: #11181b;
+  --pi-bg-tertiary: #182226;
+  --pi-bg-hover: #223036;
   --pi-shell-bg: color-mix(in srgb, var(--pi-bg) 92%, black 8%);
   --pi-material-sidebar: color-mix(in srgb, var(--pi-bg-secondary) 78%, transparent);
   --pi-material-chrome: color-mix(in srgb, var(--pi-titlebar-bg) 78%, transparent);
@@ -94,57 +93,57 @@
   --pi-material-control: color-mix(in srgb, var(--pi-bg-tertiary) 82%, transparent);
   --pi-material-highlight: color-mix(in srgb, var(--pi-accent) 14%, transparent);
   --pi-hairline: color-mix(in srgb, var(--pi-border) 68%, transparent);
-  --pi-titlebar-bg: #151519;
-  --pi-titlebar-text: #e0e0e8;
-  --pi-titlebar-border: #2a2a2e;
-  --pi-titlebar-hover: #24242a;
-  --pi-titlebar-active: #2d2d38;
+  --pi-titlebar-bg: #090d0f;
+  --pi-titlebar-text: #edf5f2;
+  --pi-titlebar-border: #223138;
+  --pi-titlebar-hover: #172126;
+  --pi-titlebar-active: #1e3a2c;
 
-  --pi-selected-bg: #2d2d38;
-  --pi-user-msg-bg: #2d2d38;
-  --pi-user-msg-text: #e0e0e8;
-  --pi-custom-msg-bg: #2d2d38;
-  --pi-custom-msg-text: #e0e0e8;
-  --pi-custom-msg-label: #00aaff;
+  --pi-selected-bg: #1e3a2c;
+  --pi-user-msg-bg: #15251f;
+  --pi-user-msg-text: #edf5f2;
+  --pi-custom-msg-bg: #201a2a;
+  --pi-custom-msg-text: #edf5f2;
+  --pi-custom-msg-label: #8fd56b;
 
-  --pi-tool-pending-bg: #1e1e2e;
-  --pi-tool-success-bg: #1e2e1e;
-  --pi-tool-error-bg: #2e1e1e;
-  --pi-tool-title: #00aaff;
-  --pi-tool-output: #c0c0d0;
+  --pi-tool-pending-bg: #151d21;
+  --pi-tool-success-bg: #14291a;
+  --pi-tool-error-bg: #2b1720;
+  --pi-tool-title: #8fd56b;
+  --pi-tool-output: #d6e3e0;
 
-  --pi-md-heading: #ffaa00;
-  --pi-md-link: #00aaff;
-  --pi-md-link-url: #888892;
-  --pi-md-code: #00ffff;
-  --pi-md-code-block: #e0e0e8;
-  --pi-md-code-block-border: #3a3a3e;
-  --pi-md-quote: #888892;
-  --pi-md-quote-border: #3a3a3e;
-  --pi-md-hr: #3a3a3e;
-  --pi-md-list-bullet: #00ffff;
+  --pi-md-heading: #e6c36a;
+  --pi-md-link: #73b7d8;
+  --pi-md-link-url: #9fb3b1;
+  --pi-md-code: #d79bdc;
+  --pi-md-code-block: #edf5f2;
+  --pi-md-code-block-border: #435e51;
+  --pi-md-quote: #9fb3b1;
+  --pi-md-quote-border: #4c6d54;
+  --pi-md-hr: #32444b;
+  --pi-md-list-bullet: #8fd56b;
 
-  --pi-diff-added: #00cc66;
-  --pi-diff-removed: #ff4444;
-  --pi-diff-context: #888892;
+  --pi-diff-added: #8fd56b;
+  --pi-diff-removed: #dd6a86;
+  --pi-diff-context: #9fb3b1;
 
-  --pi-syntax-comment: #888892;
-  --pi-syntax-keyword: #00aaff;
-  --pi-syntax-function: #00ccff;
-  --pi-syntax-variable: #ffaa00;
-  --pi-syntax-string: #00cc66;
-  --pi-syntax-number: #ff66cc;
-  --pi-syntax-type: #00ccff;
-  --pi-syntax-operator: #00aaff;
-  --pi-syntax-punctuation: #888892;
+  --pi-syntax-comment: #708583;
+  --pi-syntax-keyword: #d79bdc;
+  --pi-syntax-function: #8fd56b;
+  --pi-syntax-variable: #e6c36a;
+  --pi-syntax-string: #9edc82;
+  --pi-syntax-number: #e9a0b8;
+  --pi-syntax-type: #b9d68b;
+  --pi-syntax-operator: #73b7d8;
+  --pi-syntax-punctuation: #9fb3b1;
 
-  --pi-thinking-off: #55555a;
-  --pi-thinking-minimal: #00aaff;
-  --pi-thinking-low: #00ccff;
-  --pi-thinking-medium: #00ffff;
-  --pi-thinking-high: #ff66cc;
-  --pi-thinking-xhigh: #ff4444;
-  --pi-bash-mode: #ffaa00;
+  --pi-thinking-off: #708583;
+  --pi-thinking-minimal: #73b7d8;
+  --pi-thinking-low: #8fd56b;
+  --pi-thinking-medium: #e6c36a;
+  --pi-thinking-high: #d79bdc;
+  --pi-thinking-xhigh: #dd6a86;
+  --pi-bash-mode: #e6c36a;
 
   /* Spacing & sizing */
   --sidebar-width: 280px;
@@ -224,6 +223,9 @@ body {
 }
 
 .pi-composer-material {
+  position: relative;
+  z-index: 45;
+  overflow: visible;
   background: color-mix(in srgb, var(--pi-bg) 86%, transparent);
   border-color: var(--pi-hairline);
   box-shadow: inset 0 1px color-mix(in srgb, white 5%, transparent);
@@ -311,6 +313,8 @@ body {
 /* Code font */
 code, pre, .font-mono {
   font-family: var(--font-mono);
+}
+code, pre {
   font-size: 0.9em;
 }
 
@@ -362,6 +366,11 @@ code, pre, .font-mono {
 }
 
 /* Markdown content styles */
+.markdown-body {
+  color: var(--pi-text);
+  line-height: 1.68;
+  letter-spacing: 0;
+}
 .markdown-body h1, .markdown-body h2, .markdown-body h3,
 .markdown-body h4, .markdown-body h5, .markdown-body h6 {
   color: var(--pi-md-heading);
@@ -372,7 +381,7 @@ code, pre, .font-mono {
 .markdown-body h1 { font-size: 1.5em; }
 .markdown-body h2 { font-size: 1.3em; }
 .markdown-body h3 { font-size: 1.15em; }
-.markdown-body p { margin: 0.5em 0; }
+.markdown-body p { margin: 0.65em 0; }
 .markdown-body a { color: var(--pi-md-link); text-decoration: underline; }
 .markdown-body a:hover { color: var(--pi-accent); }
 .markdown-body code {
@@ -394,7 +403,7 @@ code, pre, .font-mono {
   background: none;
   padding: 0;
   font-size: 0.85em;
-  line-height: 1.6;
+  line-height: 1.68;
 }
 .markdown-body blockquote {
   border-left: 3px solid var(--pi-md-quote-border);
@@ -429,6 +438,48 @@ code, pre, .font-mono {
   background: var(--pi-accent);
   color: #fff;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--pi-accent) 70%, #fff);
+}
+
+/* Code viewer */
+.code-viewer-preview,
+.code-viewer-source {
+  tab-size: 2;
+  letter-spacing: 0;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  -webkit-font-smoothing: antialiased;
+}
+.code-viewer-source {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 34%),
+    var(--pi-bg);
+}
+.code-viewer-highlight pre {
+  margin: 0 !important;
+  padding: 1rem 0 !important;
+  overflow: visible !important;
+  background: transparent !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: 1.45 !important;
+}
+.code-viewer-highlight code {
+  display: block;
+  min-width: max-content;
+  background: transparent !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
+}
+.code-viewer-highlight .line {
+  display: block;
+  min-height: 1.45em;
+}
+.pi-code-wrap .code-viewer-highlight,
+.pi-code-wrap .code-viewer-highlight code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Toast animations */

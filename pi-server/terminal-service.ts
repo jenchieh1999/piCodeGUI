@@ -18,6 +18,7 @@ interface TerminalBase {
   cwd: string;
   shell: string;
   backend: 'pty' | 'pipe';
+  output: string;
 }
 
 interface PtyTerminalProcess extends TerminalBase {
@@ -33,12 +34,20 @@ interface PipeTerminalProcess extends TerminalBase {
 
 type TerminalProcess = PtyTerminalProcess | PipeTerminalProcess;
 
+const MAX_TERMINAL_BUFFER_CHARS = 220_000;
+
 export class TerminalService {
   private readonly terminals = new Map<string, TerminalProcess>();
 
   constructor(private readonly sendMessage: SendMessage) {}
 
-  async start(sessionId: string, terminalId?: string, size: TerminalSize = {}): Promise<void> {
+  async start(
+    sessionId: string,
+    terminalId?: string,
+    size: TerminalSize = {},
+    replay = true,
+    replayTarget?: SendMessage
+  ): Promise<void> {
     const session = getSession(sessionId);
     if (!session) {
       this.sendMessage({ type: 'terminal_error', sessionId, message: 'Session not found.' });
@@ -50,6 +59,9 @@ export class TerminalService {
     if (existing) {
       this.resize(id, size.cols, size.rows);
       this.sendStarted(existing);
+      if (replay && existing.output) {
+        (replayTarget ?? this.sendMessage)({ type: 'terminal_output', terminalId: id, data: existing.output });
+      }
       return;
     }
 
@@ -74,6 +86,7 @@ export class TerminalService {
           cwd,
           shell: command.label,
           backend: 'pty',
+          output: '',
           pty,
           disposables,
         };
@@ -191,6 +204,7 @@ export class TerminalService {
         cwd,
         shell: command.label,
         backend: 'pipe',
+        output: '',
         child,
       };
       this.terminals.set(id, terminal);
@@ -239,10 +253,21 @@ export class TerminalService {
     });
   }
 
-  private sendOutput(terminalId: string, data: string): void {
+  private sendOutput(terminalId: string, data: string, record = true): void {
     if (!data) return;
+    if (record) {
+      const terminal = this.terminals.get(terminalId);
+      if (terminal) {
+        terminal.output = trimTerminalOutput(`${terminal.output}${data}`);
+      }
+    }
     this.sendMessage({ type: 'terminal_output', terminalId, data });
   }
+}
+
+function trimTerminalOutput(output: string): string {
+  if (output.length <= MAX_TERMINAL_BUFFER_CHARS) return output;
+  return output.slice(output.length - MAX_TERMINAL_BUFFER_CHARS);
 }
 
 let ptyLoadAttempted = false;

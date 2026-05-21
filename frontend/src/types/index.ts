@@ -49,8 +49,9 @@ export interface ChatMessage {
 }
 
 export interface MessageContent {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'permission_request';
+  type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking' | 'permission_request';
   text?: string;
+  image?: ImageAttachment;
   toolUse?: ToolUse;
   toolResult?: ToolResult;
   thinking?: ThinkingBlock;
@@ -167,12 +168,19 @@ export interface AuthProviderStatus {
   configured: boolean;
   source?: string;
   label?: string;
+  baseUrl?: string;
+  defaultBaseUrl?: string;
+  aliases?: string[];
+  docsUrl?: string;
+  customConfig?: boolean;
   models: number;
   availableModels: number;
 }
 
 export interface AuthStatusResult {
   providers: AuthProviderStatus[];
+  modelsJsonPath?: string;
+  modelsJsonError?: string;
 }
 
 export interface AuthProviderTestResult {
@@ -185,6 +193,7 @@ export interface AuthProviderTestResult {
   models: number;
   availableModels: number;
   modelId?: string;
+  endpoint?: string;
   durationMs: number;
   message: string;
   error?: string;
@@ -194,7 +203,7 @@ export interface SlashCommandInfo {
   name: string;
   description: string;
   category?: string;
-  source?: 'runtime' | 'extension' | 'builtin';
+  source?: 'runtime' | 'extension' | 'builtin' | 'skill' | 'prompt';
   insertText?: string;
 }
 
@@ -292,10 +301,19 @@ export interface ChannelConfig {
   encryptionKey?: string;
   appId?: string;
   appSecret?: string;
+  wechatBotToken?: string;
+  wechatBotId?: string;
+  wechatUserId?: string;
+  wechatBaseUrl?: string;
+  wechatSyncCursor?: string;
   defaultRecipientId?: string;
   lastRecipientId?: string;
+  lastContextToken?: string;
+  pairingCode?: string;
+  pairingExpiresAt?: number;
   defaultProjectPath?: string;
   defaultSessionId?: string;
+  sessionBindings?: Record<string, string>;
   autoCreateSession: boolean;
   createdAt: number;
   updatedAt: number;
@@ -326,7 +344,75 @@ export interface ChannelTestResult {
   channel?: ChannelConfig;
 }
 
+export interface ChannelPairingResult {
+  ok: boolean;
+  message: string;
+  channel?: ChannelConfig;
+  pairingCode?: string;
+  expiresAt?: number;
+}
+
+export interface ChannelWechatQrStartResult {
+  ok: boolean;
+  message: string;
+  channel?: ChannelConfig;
+  sessionKey?: string;
+  qrcodeUrl?: string;
+  expiresAt?: number;
+}
+
+export interface ChannelWechatQrStatusResult {
+  ok: boolean;
+  message: string;
+  channel?: ChannelConfig;
+  status?: string;
+  connected?: boolean;
+  alreadyConnected?: boolean;
+  sessionKey?: string;
+  needsVerifyCode?: boolean;
+}
+
 // ---- Agents ----
+
+export type AgentRole =
+  | 'main'
+  | 'subagent'
+  | 'planner'
+  | 'implementer'
+  | 'reviewer'
+  | 'tester'
+  | 'documenter'
+  | 'researcher'
+  | 'custom';
+
+export interface AgentSubAgentConfig {
+  enabled: boolean;
+  autoDelegate: boolean;
+  triggers: string[];
+  maxParallel: number;
+  reviewRequired: boolean;
+  outputContract: string;
+}
+
+export interface AgentSelfImprovementConfig {
+  enabled: boolean;
+  captureCorrections: boolean;
+  captureFailures: boolean;
+  projectMemory: boolean;
+  includeRecentLearnings: boolean;
+}
+
+export interface AgentLearningRecord {
+  id: string;
+  type: 'correction' | 'failure' | 'preference' | 'workflow' | 'insight';
+  title: string;
+  content: string;
+  projectPath?: string;
+  agentId?: string;
+  tags: string[];
+  createdAt: number;
+  source: 'manual' | 'auto';
+}
 
 export interface AgentConfig {
   id: string;
@@ -334,6 +420,10 @@ export interface AgentConfig {
   description: string;
   systemPrompt: string;
   enabled: boolean;
+  role: AgentRole;
+  parentAgentId?: string;
+  subAgent: AgentSubAgentConfig;
+  selfImprovement: AgentSelfImprovementConfig;
   modelProvider?: string;
   modelId?: string;
   projectPath?: string;
@@ -347,10 +437,155 @@ export interface AgentInput {
   description?: string;
   systemPrompt?: string;
   enabled?: boolean;
+  role?: AgentRole;
+  parentAgentId?: string;
+  subAgent?: Partial<AgentSubAgentConfig>;
+  selfImprovement?: Partial<AgentSelfImprovementConfig>;
   modelProvider?: string;
   modelId?: string;
   projectPath?: string;
   channelIds?: string[];
+}
+
+export type AgentRoomMode = 'balanced' | 'technical_decision' | 'research' | 'code_review' | 'custom';
+export type AgentRoomStatus = 'idle' | 'planning' | 'researching' | 'debating' | 'reviewing' | 'completed' | 'failed' | 'cancelled';
+export type AgentRoomRunStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type AgentRoomStage =
+  | 'intake'
+  | 'planning'
+  | 'left_research'
+  | 'right_research'
+  | 'left_synthesis'
+  | 'right_synthesis'
+  | 'debate'
+  | 'neutral_review'
+  | 'final_report'
+  | 'memory';
+export type AgentRoomGroup = 'moderator' | 'left' | 'right' | 'neutral' | 'system';
+
+export interface ModelRef {
+  provider: string;
+  id: string;
+}
+
+export interface AgentRoomConfig {
+  debateRounds: number;
+  maxParallel: number;
+  quickModel?: ModelRef;
+  deepModel?: ModelRef;
+  useWebSearch: boolean;
+  useWorkspaceSearch: boolean;
+  persistMemory: boolean;
+  tokenBudget: number;
+  requirePermissionForExternalSearch: boolean;
+  stopOnHighRiskTool: boolean;
+}
+
+export interface AgentRoom {
+  id: string;
+  title: string;
+  sessionId?: string;
+  projectPath?: string;
+  question: string;
+  mode: AgentRoomMode;
+  status: AgentRoomStatus;
+  leftLabel: string;
+  rightLabel: string;
+  neutralLabel: string;
+  config: AgentRoomConfig;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentRoomRun {
+  id: string;
+  roomId: string;
+  status: AgentRoomRunStatus;
+  currentStage: AgentRoomStage;
+  currentRound: number;
+  startedAt: number;
+  completedAt?: number;
+  error?: string;
+  tokenUsage?: TokenUsage;
+}
+
+export interface AgentRoomMessage {
+  id: string;
+  roomId: string;
+  runId: string;
+  group: AgentRoomGroup;
+  agentId: string;
+  agentName: string;
+  role: string;
+  stage: AgentRoomStage;
+  round?: number;
+  content: MessageContent[];
+  artifactIds: string[];
+  timestamp: number;
+  isStreaming?: boolean;
+}
+
+export interface AgentRoomCitation {
+  id: string;
+  title: string;
+  source: string;
+  kind: 'web' | 'workspace' | 'memory' | 'user' | 'mock' | 'model';
+}
+
+export interface AgentRoomArtifact {
+  id: string;
+  roomId: string;
+  runId: string;
+  group: Exclude<AgentRoomGroup, 'system' | 'moderator'>;
+  agentId: string;
+  type: 'evidence' | 'claim' | 'counterclaim' | 'risk' | 'summary' | 'final_report';
+  title: string;
+  content: string;
+  citations: AgentRoomCitation[];
+  confidence: number;
+  createdAt: number;
+}
+
+export interface AgentRoomTask {
+  id: string;
+  roomId: string;
+  runId: string;
+  group: Exclude<AgentRoomGroup, 'system' | 'moderator'>;
+  agentRole: string;
+  title: string;
+  prompt: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+  dependencies: string[];
+  outputArtifactIds: string[];
+  error?: string;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export interface AgentRoomSnapshot {
+  rooms: AgentRoom[];
+  runsByRoom: Record<string, AgentRoomRun[]>;
+  messagesByRoom: Record<string, AgentRoomMessage[]>;
+  artifactsByRoom: Record<string, AgentRoomArtifact[]>;
+  tasksByRoom: Record<string, AgentRoomTask[]>;
+}
+
+export interface AgentRoomCreateInput {
+  sessionId?: string;
+  projectPath?: string;
+  title?: string;
+  question: string;
+  mode?: AgentRoomMode;
+  leftLabel?: string;
+  rightLabel?: string;
+  neutralLabel?: string;
+  debateRounds?: number;
+  maxParallel?: number;
+  quickModel?: ModelRef;
+  deepModel?: ModelRef;
+  useWebSearch?: boolean;
+  useWorkspaceSearch?: boolean;
+  persistMemory?: boolean;
 }
 
 export interface ServerDiagnostics {
@@ -389,6 +624,9 @@ export interface ServerDiagnostics {
     permissionAuditEntries: number;
     packages: number;
     extensions: number;
+    skills?: number;
+    prompts?: number;
+    resourceDiagnostics?: number;
     themes: number;
   };
   providers: Array<{
@@ -404,28 +642,161 @@ export interface ExtensionInfo {
   name: string;
   path: string;
   enabled: boolean;
-  scope: 'user' | 'project';
+  scope: 'user' | 'project' | 'temporary';
   source: 'package' | 'local';
+  sourceName?: string;
+  origin?: 'package' | 'top-level';
   description?: string;
+  tools?: string[];
+  commands?: string[];
+  flags?: string[];
+  shortcuts?: string[];
+  errors?: string[];
 }
 
 export interface SkillInfo {
   name: string;
   description: string;
   filePath: string;
+  baseDir?: string;
   enabled: boolean;
-  scope: 'user' | 'project';
+  scope: 'user' | 'project' | 'temporary';
+  source: 'package' | 'local';
+  sourceName?: string;
+  origin?: 'package' | 'top-level';
+  disableModelInvocation?: boolean;
+  command?: string;
 }
 
 export interface PackageInfo {
   name: string;
   version: string;
   source: string;
+  scope?: 'user' | 'project' | 'temporary';
+  installedPath?: string;
+  filtered?: boolean;
+  filter?: PackageResourceFilter;
+  disabled?: boolean;
   installedAt: number;
   extensions: string[];
   skills: string[];
   prompts: string[];
   themes: string[];
+}
+
+export interface PackageResourceFilter {
+  extensions?: string[];
+  skills?: string[];
+  prompts?: string[];
+  themes?: string[];
+}
+
+export interface PromptTemplateInfo {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  filePath: string;
+  enabled: boolean;
+  scope: 'user' | 'project' | 'temporary';
+  source: 'package' | 'local';
+  sourceName?: string;
+  origin?: 'package' | 'top-level';
+  command: string;
+}
+
+export interface ResourceDiagnosticInfo {
+  type: 'info' | 'warning' | 'error' | 'collision';
+  resourceType?: 'extension' | 'skill' | 'prompt' | 'theme' | 'package';
+  message: string;
+  path?: string;
+  source?: string;
+  name?: string;
+  winnerPath?: string;
+  loserPath?: string;
+}
+
+export interface PackageProgressInfo {
+  type: 'start' | 'progress' | 'complete' | 'error';
+  action: 'install' | 'remove' | 'update' | 'clone' | 'pull' | 'reload';
+  source: string;
+  message?: string;
+  timestamp: number;
+}
+
+export interface ExtensionResourceSnapshot {
+  projectPath: string;
+  packages: PackageInfo[];
+  extensions: ExtensionInfo[];
+  skills: SkillInfo[];
+  prompts: PromptTemplateInfo[];
+  themes: PiTheme[];
+  diagnostics: ResourceDiagnosticInfo[];
+  slashCommands: SlashCommandInfo[];
+  marketplace: MarketplacePackageInfo[];
+  trust: ResourceTrustRecord[];
+}
+
+export type ResourceTrustDecision = 'trusted' | 'untrusted' | 'blocked';
+export type ResourceTrustKind = 'package' | 'extension' | 'skill' | 'prompt' | 'theme';
+
+export interface ResourceTrustRecord {
+  id: string;
+  kind: ResourceTrustKind;
+  name: string;
+  source?: string;
+  path?: string;
+  decision: ResourceTrustDecision;
+  scope?: 'user' | 'project' | 'temporary';
+  updatedAt: number;
+  reason?: string;
+}
+
+export interface MarketplacePackageInfo {
+  id: string;
+  name: string;
+  source: string;
+  description: string;
+  tags: string[];
+  recommendedScope: 'user' | 'project';
+  trustLevel: 'official' | 'community' | 'local';
+  installed: boolean;
+  available?: boolean;
+  unavailableReason?: string;
+}
+
+export interface SkillHubItem {
+  id: string;
+  provider: 'clawhub' | 'skillhub' | 'curated';
+  name: string;
+  displayName: string;
+  description: string;
+  author?: string;
+  url?: string;
+  version?: string;
+  tags: string[];
+  downloads?: number;
+  installs?: number;
+  stars?: number;
+  updatedAt?: number;
+  score?: number;
+  installSource?: string;
+  installed?: boolean;
+  sourceLabel?: string;
+}
+
+export interface SkillHubSearchResult {
+  query: string;
+  items: SkillHubItem[];
+  source: 'clawhub' | 'skillhub' | 'curated' | 'mixed';
+  usedFallback: boolean;
+  message?: string;
+}
+
+export interface SkillHubStatus {
+  endpoint: string;
+  apiKeyConfigured: boolean;
+  defaultProvider: 'clawhub' | 'skillhub';
+  curatedCount: number;
 }
 
 // ---- Scheduled Tasks ----
@@ -485,6 +856,8 @@ export interface WorkspaceChangedFile {
   status: WorkspaceFileStatus;
   additions: number;
   deletions: number;
+  staged?: boolean;
+  unstaged?: boolean;
 }
 
 export interface WorkspaceStatusResult {
@@ -492,8 +865,47 @@ export interface WorkspaceStatusResult {
   workDir: string;
   repoName: string | null;
   branch: string | null;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  hasStagedChanges?: boolean;
+  hasUnstagedChanges?: boolean;
   isGitRepo: boolean;
   changedFiles: WorkspaceChangedFile[];
+  error?: string;
+}
+
+export type WorkspaceChangeAction = 'accept' | 'discard' | 'unstage';
+
+export interface WorkspaceChangeOperationResult {
+  state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error';
+  action: WorkspaceChangeAction;
+  path: string;
+  status?: WorkspaceFileStatus;
+  statusResult?: WorkspaceStatusResult;
+  error?: string;
+}
+
+export type WorkspaceGitOperationAction = 'stage_all' | 'unstage_all' | 'commit' | 'pull' | 'push';
+
+export interface WorkspaceGitOperationResult {
+  state: 'ok' | 'not_git_repo' | 'missing_workdir' | 'error';
+  action: WorkspaceGitOperationAction;
+  output?: string;
+  statusResult?: WorkspaceStatusResult;
+  error?: string;
+}
+
+export interface WorkspaceDeleteFileResult {
+  state: 'ok' | 'missing' | 'error';
+  path: string;
+  error?: string;
+}
+
+export interface WorkspaceMoveFileResult {
+  state: 'ok' | 'missing' | 'conflict' | 'error';
+  sourcePath: string;
+  targetPath: string;
   error?: string;
 }
 
@@ -546,6 +958,30 @@ export interface WorkspaceSearchResult {
   error?: string;
 }
 
+export interface PromptOptimizeInput {
+  text: string;
+  projectName?: string;
+  projectPath?: string;
+  language?: 'zh' | 'en' | 'ja';
+  hasFileReferences?: boolean;
+  hasImages?: boolean;
+  selectionOnly?: boolean;
+  sessionId?: string;
+  currentModel?: {
+    provider: string;
+    id: string;
+  };
+}
+
+export interface PromptOptimizeResult {
+  optimized: string;
+  source: 'model' | 'local';
+  durationMs: number;
+  provider?: string;
+  modelId?: string;
+  warning?: string;
+}
+
 // ---- WebSocket Protocol ----
 
 export type WsClientMessage =
@@ -560,14 +996,17 @@ export type WsClientMessage =
   | { type: 'set_thinking_level'; level: ThinkingLevel; sessionId?: string }
   | { type: 'session_create'; projectPath: string; branch?: string | null; worktree?: boolean }
   | { type: 'session_delete'; sessionId: string }
+  | { type: 'session_clear'; sessionId: string }
   | { type: 'session_rename'; sessionId: string; title: string }
   | { type: 'session_tree_navigate'; sessionId: string; targetId: string }
   | { type: 'session_compact'; sessionId: string }
   | { type: 'session_fork'; sessionId: string; entryId: string }
-  | { type: 'package_install'; source: string }
-  | { type: 'package_remove'; source: string }
+  | { type: 'package_install'; source: string; scope?: 'user' | 'project'; projectPath?: string; trustConfirmed?: boolean }
+  | { type: 'package_remove'; source: string; scope?: 'user' | 'project'; projectPath?: string }
+  | { type: 'package_update'; source?: string; projectPath?: string }
+  | { type: 'resources_reload'; projectPath?: string }
   | { type: 'theme_set'; name: string }
-  | { type: 'terminal_start'; sessionId: string; terminalId?: string; cols?: number; rows?: number }
+  | { type: 'terminal_start'; sessionId: string; terminalId?: string; cols?: number; rows?: number; replay?: boolean }
   | { type: 'terminal_input'; terminalId: string; data: string }
   | { type: 'terminal_resize'; terminalId: string; cols: number; rows: number }
   | { type: 'terminal_stop'; terminalId: string }
@@ -582,8 +1021,14 @@ export type WsServerMessage =
       providers?: ProviderInfo[];
       packages?: PackageInfo[];
       extensions?: ExtensionInfo[];
+      skills?: SkillInfo[];
+      prompts?: PromptTemplateInfo[];
       themes?: PiTheme[];
+      resourceDiagnostics?: ResourceDiagnosticInfo[];
+      marketplace?: MarketplacePackageInfo[];
+      trust?: ResourceTrustRecord[];
       messagesBySession?: Record<string, ChatMessage[]>;
+      agentRooms?: AgentRoomSnapshot;
       runtimeInfo?: RuntimeInfo;
       slashCommands?: SlashCommandInfo[];
     }
@@ -602,6 +1047,7 @@ export type WsServerMessage =
   | { type: 'session_updated'; session: Session }
   | { type: 'session_created'; session: Session; messages?: ChatMessage[] }
   | { type: 'session_deleted'; sessionId: string }
+  | { type: 'session_cleared'; sessionId: string }
   | { type: 'queue_update'; sessionId: string; steering: number; followUp: number }
   | { type: 'compaction_start'; sessionId: string }
   | { type: 'compaction_end'; sessionId: string }
@@ -612,6 +1058,12 @@ export type WsServerMessage =
   | { type: 'themes_updated'; themes: PiTheme[] }
   | { type: 'packages_updated'; packages: PackageInfo[] }
   | { type: 'extensions_updated'; extensions: ExtensionInfo[] }
+  | { type: 'skills_updated'; skills: SkillInfo[] }
+  | { type: 'prompts_updated'; prompts: PromptTemplateInfo[] }
+  | { type: 'resource_diagnostics_updated'; diagnostics: ResourceDiagnosticInfo[] }
+  | { type: 'marketplace_updated'; marketplace: MarketplacePackageInfo[] }
+  | { type: 'resource_trust_updated'; trust: ResourceTrustRecord[] }
+  | { type: 'package_progress'; progress: PackageProgressInfo }
   | { type: 'runtime_updated'; runtimeInfo: RuntimeInfo }
   | { type: 'slash_commands_updated'; commands: SlashCommandInfo[] }
   | { type: 'file_changes'; sessionId: string; changes: FileChange[] }
@@ -619,7 +1071,22 @@ export type WsServerMessage =
   | { type: 'terminal_started'; sessionId: string; terminalId: string; cwd: string; shell: string; backend: 'pty' | 'pipe' }
   | { type: 'terminal_output'; terminalId: string; data: string }
   | { type: 'terminal_exited'; terminalId: string; exitCode: number | null; signal: string | null }
-  | { type: 'terminal_error'; sessionId?: string; terminalId?: string; message: string };
+  | { type: 'terminal_error'; sessionId?: string; terminalId?: string; message: string }
+  | { type: 'agent_room_snapshot'; snapshot: AgentRoomSnapshot }
+  | { type: 'agent_room_created'; room: AgentRoom }
+  | { type: 'agent_room_updated'; room: AgentRoom }
+  | { type: 'agent_room_deleted'; roomId: string }
+  | { type: 'agent_room_run_started'; room: AgentRoom; run: AgentRoomRun }
+  | { type: 'agent_room_run_updated'; room: AgentRoom; run: AgentRoomRun }
+  | { type: 'agent_room_stage_changed'; roomId: string; runId: string; stage: AgentRoomStage; status: AgentRoomStatus; round?: number }
+  | { type: 'agent_room_task_started'; task: AgentRoomTask }
+  | { type: 'agent_room_task_completed'; task: AgentRoomTask }
+  | { type: 'agent_room_message_added'; message: AgentRoomMessage }
+  | { type: 'agent_room_artifact_added'; artifact: AgentRoomArtifact }
+  | { type: 'agent_room_debate_round_completed'; roomId: string; runId: string; round: number }
+  | { type: 'agent_room_final_report_ready'; roomId: string; runId: string; artifact: AgentRoomArtifact }
+  | { type: 'agent_room_run_failed'; room: AgentRoom; run: AgentRoomRun; message: string }
+  | { type: 'agent_room_run_cancelled'; room: AgentRoom; run: AgentRoomRun };
 
 export interface ImageAttachment {
   data: string;
@@ -636,7 +1103,7 @@ export interface AutocompleteItem {
   icon?: string;
 }
 
-export type ViewType = 'chat' | 'settings' | 'tasks' | 'packages' | 'themes' | 'extensions' | 'agents' | 'skills';
+export type ViewType = 'chat' | 'settings' | 'tasks' | 'packages' | 'themes' | 'extensions' | 'agents' | 'agentRooms' | 'skills';
 
 export type RightPanelType = 'changes' | 'files' | 'tree' | 'usage' | 'terminal' | null;
 

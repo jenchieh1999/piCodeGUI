@@ -6,29 +6,40 @@ import { AppShell } from './components/layout/AppShell';
 import { ChatView } from './components/chat/ChatView';
 import { EmptyState } from './components/shared/EmptyState';
 import { DesktopTitleBar } from './components/desktop/DesktopTitleBar';
+import { ProjectLauncher } from './components/shared/ProjectLauncher';
 import { isMarkdownStandaloneRoute, MarkdownStandaloneView } from './components/markdown/MarkdownStandaloneView';
 import { isWorkspaceFileStandaloneRoute, WorkspaceFileStandaloneView } from './components/workspace/WorkspaceFileStandaloneView';
+import { WorkspaceQuickOpen } from './components/workspace/WorkspaceQuickOpen';
+import { isTerminalStandaloneRoute, TerminalStandaloneView } from './components/terminal/TerminalStandaloneView';
+import { isStandaloneTabsRoute, StandaloneTabsView } from './components/standalone/StandaloneTabsView';
 import { applyRuntimeSettings } from './lib/runtimeSettings';
-import { createNewSessionFromPicker } from './lib/sessionActions';
+import { createNewSessionFromPicker, OPEN_PROJECTS_EVENT } from './lib/sessionActions';
 import { useI18n } from './lib/i18n';
 import { useScheduledTaskRunner } from './hooks/useScheduledTaskRunner';
-import { Loader2, RotateCcw } from 'lucide-react';
+import { FolderOpen, Loader2, RotateCcw, X } from 'lucide-react';
 
 const SettingsView = lazy(() => import('./components/settings/SettingsView').then((m) => ({ default: m.SettingsView })));
 const PackagesView = lazy(() => import('./components/settings/PackagesView').then((m) => ({ default: m.PackagesView })));
 const ThemeEditor = lazy(() => import('./components/settings/ThemeEditor').then((m) => ({ default: m.ThemeEditor })));
 const ExtensionsView = lazy(() => import('./components/settings/ExtensionsView').then((m) => ({ default: m.ExtensionsView })));
 const AgentsView = lazy(() => import('./components/agents/AgentsView').then((m) => ({ default: m.AgentsView })));
+const AgentsRoomView = lazy(() => import('./components/agents-room/AgentsRoomView').then((m) => ({ default: m.AgentsRoomView })));
 const SkillsView = lazy(() => import('./components/skills/SkillsView').then((m) => ({ default: m.SkillsView })));
 const ScheduledTasksView = lazy(() => import('./components/tasks/ScheduledTasksView').then((m) => ({ default: m.ScheduledTasksView })));
 const DesktopDiagnostics = lazy(() => import('./components/desktop/DesktopDiagnostics').then((m) => ({ default: m.DesktopDiagnostics })));
 
 export default function App() {
+  if (isStandaloneTabsRoute()) {
+    return <StandaloneTabsView />;
+  }
   if (isMarkdownStandaloneRoute()) {
     return <MarkdownStandaloneView />;
   }
   if (isWorkspaceFileStandaloneRoute()) {
     return <WorkspaceFileStandaloneView />;
+  }
+  if (isTerminalStandaloneRoute()) {
+    return <TerminalStandaloneView />;
   }
 
   return <MainApp />;
@@ -53,7 +64,10 @@ function MainApp() {
     error?: string;
   }>({ state: 'initializing' });
   const [desktopDiagnosticsOpen, setDesktopDiagnosticsOpen] = useState(false);
+  const [projectLauncherOpen, setProjectLauncherOpen] = useState(false);
+  const [workspaceQuickOpen, setWorkspaceQuickOpen] = useState(false);
   const desktopServerUrlRef = useRef<string | null>(null);
+  const addToast = useUIStore((s) => s.addToast);
 
   useEffect(() => {
     applyRuntimeSettings({ theme, language, fontSize, fontFamily, monoFontFamily }, [...themes, ...customThemes]);
@@ -120,8 +134,10 @@ function MainApp() {
     const disposeMenu = bridge?.onMenuCommand((command) => {
       switch (command) {
         case 'new-session':
-        case 'open-project':
           void createNewSessionFromPicker();
+          break;
+        case 'open-project':
+          setProjectLauncherOpen(true);
           break;
         case 'toggle-sidebar':
           useUIStore.getState().toggleSidebar();
@@ -139,13 +155,32 @@ function MainApp() {
     });
 
     const openDiagnostics = () => setDesktopDiagnosticsOpen(true);
+    const openProjects = () => setProjectLauncherOpen(true);
     window.addEventListener('pi:desktop-open-diagnostics', openDiagnostics);
+    window.addEventListener(OPEN_PROJECTS_EVENT, openProjects);
 
     return () => {
       disposeMenu?.();
       window.removeEventListener('pi:desktop-open-diagnostics', openDiagnostics);
+      window.removeEventListener(OPEN_PROJECTS_EVENT, openProjects);
     };
   }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if (key !== 'p' || event.shiftKey || event.altKey || (!event.ctrlKey && !event.metaKey)) return;
+      event.preventDefault();
+      if (!activeSessionId) {
+        addToast({ type: 'warning', message: t('workspaceQuickOpen.noSession') });
+        return;
+      }
+      setWorkspaceQuickOpen(true);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeSessionId, addToast, t]);
 
   const retryDesktopServer = async () => {
     if (!window.piDesktop) return;
@@ -197,6 +232,8 @@ function MainApp() {
         return <ExtensionsView />;
       case 'agents':
         return <AgentsView />;
+      case 'agentRooms':
+        return <AgentsRoomView />;
       case 'skills':
         return <SkillsView />;
       case 'tasks':
@@ -221,6 +258,15 @@ function MainApp() {
           />
         </Suspense>
       )}
+      {projectLauncherOpen && (
+        <ProjectLauncherDialog onClose={() => setProjectLauncherOpen(false)} />
+      )}
+      {workspaceQuickOpen && activeSessionId && (
+        <WorkspaceQuickOpen
+          sessionId={activeSessionId}
+          onClose={() => setWorkspaceQuickOpen(false)}
+        />
+      )}
     </>
   );
 }
@@ -232,6 +278,51 @@ function ViewLoading() {
     <div className="flex h-full items-center justify-center gap-2 bg-pi-bg text-pi-muted">
       <Loader2 size={18} className="animate-spin" />
       <span className="text-xs">{t('app.viewLoading')}</span>
+    </div>
+  );
+}
+
+function ProjectLauncherDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n();
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm">
+      <button
+        aria-label={t('common.close')}
+        className="absolute inset-0 h-full w-full cursor-default"
+        onClick={onClose}
+      />
+      <div className="pi-panel-material relative z-10 flex max-h-[min(760px,calc(100vh-48px))] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-pi-border shadow-2xl shadow-black/40">
+        <div className="flex flex-shrink-0 items-center gap-3 border-b border-pi-border/70 px-4 py-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-pi-accent/20 bg-pi-accent/10 text-pi-accent">
+            <FolderOpen size={17} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-pi-text">{t('launcher.title')}</div>
+            <div className="truncate text-xs text-pi-dim">{t('launcher.subtitle')}</div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <ProjectLauncher onLaunch={onClose} />
+        </div>
+      </div>
     </div>
   );
 }

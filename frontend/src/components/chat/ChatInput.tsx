@@ -24,10 +24,13 @@ import type {
 } from '../../types';
 import { piApi } from '../../api/client';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
+import { createNewSessionFromPicker, openProjectsLauncher } from '../../lib/sessionActions';
+import { hasWorkspaceFileDragPayload, readWorkspaceFileDragPayload, type WorkspaceFileDragPayload } from '../../lib/workspaceDrag';
 import { useUIStore } from '../../stores/uiStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useModelStore } from '../../stores/modelStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useAgentRoomStore } from '../../stores/agentRoomStore';
 import { cn } from '../shared/utils';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import {
@@ -39,16 +42,18 @@ import {
   Gauge,
   Image as ImageIcon,
   Loader2,
+  Network,
   Paperclip,
   Search,
   Send,
   Shield,
+  Sparkles,
   Square,
   X,
 } from 'lucide-react';
 
 interface ChatInputProps {
-  onSend: (text: string, images?: Array<{ data: string; mimeType: string }>, displayText?: string) => boolean | void;
+  onSend: (text: string, images?: ImageAttachment[], displayText?: string) => boolean | void;
   onStop: () => void;
   isStreaming: boolean;
   sessionId: string;
@@ -129,8 +134,15 @@ const FALLBACK_SLASH_COMMANDS: Array<{
   { name: '/commit', descriptionKey: 'chat.slash.commit', categoryKey: 'chat.category.git', source: 'builtin' },
   { name: '/review', descriptionKey: 'chat.slash.review', categoryKey: 'chat.category.code', source: 'builtin' },
   { name: '/debug', descriptionKey: 'chat.slash.debug', categoryKey: 'chat.category.code', source: 'builtin' },
+  { name: '/test', descriptionKey: 'chat.slash.test', categoryKey: 'chat.category.code', source: 'builtin' },
+  { name: '/explain', descriptionKey: 'chat.slash.explain', categoryKey: 'chat.category.code', source: 'builtin' },
   { name: '/compact', descriptionKey: 'chat.slash.compact', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/clear', descriptionKey: 'chat.slash.clear', categoryKey: 'chat.category.session', source: 'builtin' },
   { name: '/tree', descriptionKey: 'chat.slash.tree', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/fork', descriptionKey: 'chat.slash.fork', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/new', descriptionKey: 'chat.slash.new', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/projects', descriptionKey: 'chat.slash.projects', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/memory', descriptionKey: 'chat.slash.memory', categoryKey: 'chat.category.runtime', source: 'builtin' },
 ];
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
@@ -152,6 +164,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0);
   const [atTokenStart, setAtTokenStart] = useState(-1);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
+  const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
   const [openControlMenu, setOpenControlMenu] = useState<'model' | 'permission' | 'thinking' | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -165,6 +178,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const fileReferencesRef = useRef(fileReferences);
   const addToast = useUIStore((s) => s.addToast);
   const setRightPanel = useUIStore((s) => s.setRightPanel);
+  const setActiveView = useUIStore((s) => s.setActiveView);
   const runtimeSlashCommands = useUIStore((s) => s.slashCommands);
   const messages = useChatStore((s) => s.messagesBySession[sessionId] ?? EMPTY_MESSAGES);
   const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === sessionId));
@@ -336,6 +350,23 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   }, [addFileReference, sessionId]);
 
   useEffect(() => {
+    const dispose = window.piDesktop?.onWorkspaceReference((detail) => {
+      if (!detail?.path) return;
+      if (detail.sessionId && detail.sessionId !== sessionId) return;
+      addFileReference(detail.path, {
+        name: detail.name,
+        lineStart: detail.lineStart,
+        lineEnd: detail.lineEnd,
+        excerpt: detail.excerpt,
+        sourceKind: detail.sourceKind,
+      });
+      textareaRef.current?.focus();
+    });
+
+    return () => dispose?.();
+  }, [addFileReference, sessionId]);
+
+  useEffect(() => {
     if (!showFileSearch) return;
 
     const requestId = ++searchRequestRef.current;
@@ -422,10 +453,16 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     if (isPreparingPrompt || !canSubmit) return;
 
     const trimmed = text.trim();
+    if (attachments.length === 0 && fileReferences.length === 0 && await runWorkbenchSlashCommand(trimmed)) {
+      clearComposer();
+      closeFileSearch();
+      setShowSlashMenu(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
     const references = fileReferences;
-    const images = attachments.length > 0
-      ? attachments.map((attachment) => ({ data: attachment.data, mimeType: attachment.mimeType }))
-      : undefined;
+    const images = attachments.length > 0 ? attachments : undefined;
 
     setIsPreparingPrompt(true);
     try {
@@ -437,10 +474,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       const sent = onSend(modelText, images, displayText);
       if (sent === false) return;
 
-      setText('');
-      setAttachments([]);
-      setFileReferences([]);
-      draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+      clearComposer();
       closeFileSearch();
       setShowSlashMenu(false);
       textareaRef.current?.focus();
@@ -452,6 +486,47 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       });
     } finally {
       setIsPreparingPrompt(false);
+    }
+  };
+
+  const clearComposer = () => {
+    setText('');
+    setAttachments([]);
+    setFileReferences([]);
+    draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+  };
+
+  const runWorkbenchSlashCommand = async (value: string): Promise<boolean> => {
+    const command = value.split(/\s+/)[0]?.toLowerCase();
+    if (!command) return false;
+
+    switch (command) {
+      case '/projects': {
+        openProjectsLauncher();
+        addToast({ type: 'info', message: t('chat.command.projectsOpened') });
+        return true;
+      }
+      case '/new': {
+        await createNewSessionFromPicker();
+        return true;
+      }
+      case '/clear': {
+        const sent = piApi.send({ type: 'session_clear', sessionId });
+        if (!sent) {
+          addToast({
+            type: 'error',
+            message: t('chat.command.clearDisconnected'),
+            duration: 6000,
+          });
+          return true;
+        }
+        useChatStore.getState().clearMessages(sessionId);
+        useChatStore.getState().stopStreaming(sessionId);
+        addToast({ type: 'success', message: t('chat.command.cleared') });
+        return true;
+      }
+      default:
+        return false;
     }
   };
 
@@ -477,6 +552,10 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     const sent = piApi.send({ type: 'set_thinking_level', sessionId, level });
     if (!sent) {
       addToast({ type: 'error', message: t('chat.switchThinkingDisconnected') });
+      return;
+    }
+    if (activeSession) {
+      useChatStore.getState().updateSession({ ...activeSession, thinkingLevel: level, updatedAt: Date.now() });
     }
     setOpenControlMenu(null);
   };
@@ -571,9 +650,59 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     }
   };
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+  const resolveDroppedWorkspaceReference = useCallback(async (
+    payload: WorkspaceFileDragPayload
+  ): Promise<{ path: string; name: string } | null> => {
+    if (payload.isDirectory) {
+      addToast({ type: 'warning', message: t('chat.workspaceDropFolderUnsupported') });
+      return null;
+    }
+
+    if (payload.sessionId === sessionId) {
+      return { path: payload.path, name: payload.name };
+    }
+
+    try {
+      const [sourceWorkspace, targetWorkspace] = await Promise.all([
+        piApi.getWorkspaceStatus(payload.sessionId),
+        piApi.getWorkspaceStatus(sessionId),
+      ]);
+
+      if (
+        sourceWorkspace.state === 'ok' &&
+        targetWorkspace.state === 'ok' &&
+        sameWorkspaceRoot(sourceWorkspace.workDir, targetWorkspace.workDir)
+      ) {
+        return { path: payload.path, name: payload.name };
+      }
+    } catch {
+      // Fall back to the existing different-session warning below.
+    }
+
+    addToast({ type: 'warning', message: t('chat.workspaceDropDifferentSession') });
+    return null;
+  }, [addToast, sessionId, t]);
+
+  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    void appendComposerFiles(Array.from(event.dataTransfer.files));
+    const workspacePayload = readWorkspaceFileDragPayload(event.dataTransfer);
+    if (workspacePayload) {
+      const reference = await resolveDroppedWorkspaceReference(workspacePayload);
+      if (reference) {
+        addFileReference(reference.path, { name: reference.name });
+        textareaRef.current?.focus();
+      }
+      return;
+    }
+
+    const plainPath = readPlainDroppedPath(event.dataTransfer);
+    if (plainPath) {
+      addFileReference(plainPath, { name: basename(plainPath) });
+      textareaRef.current?.focus();
+      return;
+    }
+
+    await appendComposerFiles(Array.from(event.dataTransfer.files));
   };
 
   const handleFileSelect = () => {
@@ -683,6 +812,119 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     });
   };
 
+  const optimizeComposerPrompt = async () => {
+    if (isOptimizingPrompt) return;
+
+    const sourceText = text.trim();
+    if (!sourceText) {
+      addToast({ type: 'warning', message: t('chat.optimizePromptEmpty') });
+      return;
+    }
+
+    const textarea = textareaRef.current;
+    const selectionStart = textarea?.selectionStart ?? 0;
+    const selectionEnd = textarea?.selectionEnd ?? 0;
+    const hasSelection = selectionEnd > selectionStart;
+    const selectedText = hasSelection ? text.slice(selectionStart, selectionEnd).trim() : '';
+    const targetText = selectedText || sourceText;
+
+    setIsOptimizingPrompt(true);
+    const optimizationContext = {
+      projectName: activeSession?.projectName,
+      projectPath: activeSession?.projectPath,
+      hasFileReferences: fileReferences.length > 0,
+      hasImages: attachments.length > 0,
+    };
+    let optimized = '';
+    let optimizedByModel = false;
+
+    try {
+      const result = await piApi.optimizePrompt({
+        text: targetText,
+        ...optimizationContext,
+        language: detectPromptLanguage(targetText),
+        selectionOnly: hasSelection,
+        sessionId,
+        currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+      });
+      optimized = result.optimized.trim();
+      optimizedByModel = result.source === 'model';
+    } catch (err) {
+      console.warn('[ChatInput] Fast prompt optimizer unavailable, using local fallback:', err);
+      optimized = optimizePromptDraft(targetText, optimizationContext);
+    }
+
+    if (!optimized) {
+      optimized = optimizePromptDraft(targetText, optimizationContext);
+    }
+
+    if (hasSelection && selectedText) {
+      const before = text.slice(0, selectionStart);
+      const after = text.slice(selectionEnd);
+      const nextText = `${before}${optimized}${after}`;
+      setText(nextText);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(before.length, before.length + optimized.length);
+      });
+    } else {
+      setText(optimized);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(optimized.length, optimized.length);
+      });
+    }
+
+    closeFileSearch();
+    setShowSlashMenu(false);
+    addToast({
+      type: 'success',
+      message: optimizedByModel
+        ? t('chat.optimizePromptModelDone')
+        : (hasSelection ? t('chat.optimizePromptSelectionDone') : t('chat.optimizePromptDone')),
+    });
+    setIsOptimizingPrompt(false);
+  };
+
+  const launchAgentRoom = async () => {
+    const question = text.trim() || activeSession?.title || '';
+    if (!question) {
+      addToast({ type: 'warning', message: t('agentsRoom.questionRequired') });
+      return;
+    }
+
+    try {
+      const result = await piApi.createAgentRoom({
+        sessionId,
+        projectPath: activeSession?.projectPath,
+        question,
+        mode: 'balanced',
+        leftLabel: t('agentsRoom.defaultLeft'),
+        rightLabel: t('agentsRoom.defaultRight'),
+        neutralLabel: t('agentsRoom.defaultNeutral'),
+        debateRounds: 2,
+        useWorkspaceSearch: true,
+        useWebSearch: false,
+      });
+      useAgentRoomStore.getState().setSnapshot(result.snapshot);
+      useAgentRoomStore.getState().setActiveRoom(result.room.id);
+      setActiveView('agentRooms');
+      void piApi.startAgentRoomRun(result.room.id).then((runResult) => {
+        useAgentRoomStore.getState().upsertRoom(runResult.room);
+        useAgentRoomStore.getState().upsertRun(runResult.run);
+      });
+      setText('');
+      closeFileSearch();
+      setShowSlashMenu(false);
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('agentsRoom.createFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
   function closeFileSearch() {
     setShowFileSearch(false);
     setFileSearchFilter('');
@@ -691,22 +933,37 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   }
 
   return (
-    <div className="pi-composer-material border-t" onDrop={handleDrop} onDragOver={(event) => event.preventDefault()}>
+    <div
+      className="pi-composer-material relative z-[45] overflow-visible border-t"
+      onDrop={(event) => void handleDrop(event)}
+      onDragOver={(event) => {
+        event.preventDefault();
+        if (hasWorkspaceFileDragPayload(event.dataTransfer) || readPlainDroppedPath(event.dataTransfer)) {
+          event.dataTransfer.dropEffect = 'copy';
+        }
+      }}
+    >
       {(fileReferences.length > 0 || attachments.length > 0) && (
         <div className="flex items-center gap-2 px-3 pt-2 pb-1 flex-wrap">
           {fileReferences.map((ref) => (
             <div
               key={ref.id}
-              className="group inline-flex h-8 max-w-[260px] items-center gap-1.5 rounded-lg border border-pi-border/70 bg-pi-bg-tertiary/70 px-2 text-xs text-pi-muted"
+              className="group inline-flex h-10 max-w-[320px] items-center gap-2 rounded-2xl border border-pi-border/70 bg-pi-bg-secondary/80 px-2.5 text-xs text-pi-muted shadow-sm backdrop-blur-xl"
               title={ref.path}
             >
-              <FileText size={13} className="text-pi-accent flex-shrink-0" />
-              <span className="truncate">
-                {ref.path}{formatReferenceRange(ref)}
+              <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-xl border border-pi-accent/20 bg-pi-accent/10 text-pi-accent shadow-inner">
+                <FileText size={13} />
+              </span>
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate font-semibold text-pi-text">{ref.name || basename(ref.path)}</span>
+                <span className="block truncate text-[10px] text-pi-dim">
+                  {referenceDirectoryLabel(ref.path)}
+                  {formatReferenceRange(ref) && <span className="font-mono"> {formatReferenceRange(ref)}</span>}
+                </span>
               </span>
               <button
                 onClick={() => setFileReferences((prev) => prev.filter((item) => item.id !== ref.id))}
-                className="ml-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-pi-dim opacity-70 hover:bg-pi-bg-hover hover:text-pi-error group-hover:opacity-100"
+                className="ml-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-pi-dim opacity-70 transition-colors hover:bg-pi-bg-hover hover:text-pi-error group-hover:opacity-100"
                 title={t('chat.removeReference')}
               >
                 <X size={10} />
@@ -778,10 +1035,10 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         onOpenUsage={() => setRightPanel('usage')}
       />
 
-      <div className="flex items-end gap-2 px-3 pb-2 pt-1.5">
+      <div className="flex items-center gap-2 px-3 pb-2 pt-1.5">
         <button
           onClick={handleFileSelect}
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+          className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
           title={t('chat.attachImage')}
         >
           <Paperclip size={16} />
@@ -797,7 +1054,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         <button
           onClick={openFileSearchFromButton}
           className={cn(
-            'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border transition-colors',
+            'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border transition-colors',
             showFileSearch
               ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
               : 'border-transparent text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text'
@@ -807,9 +1064,32 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
           <AtSign size={16} />
         </button>
 
+        <button
+          onClick={optimizeComposerPrompt}
+          disabled={!text.trim() || isOptimizingPrompt || isPreparingPrompt}
+          className={cn(
+            'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border transition-colors',
+            text.trim() && !isOptimizingPrompt && !isPreparingPrompt
+              ? 'border-pi-accent/25 bg-pi-accent/10 text-pi-accent hover:bg-pi-accent/15'
+              : 'cursor-not-allowed border-transparent text-pi-dim opacity-60'
+          )}
+          title={t('chat.optimizePrompt')}
+        >
+          {isOptimizingPrompt ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
+        </button>
+
+        <button
+          onClick={() => void launchAgentRoom()}
+          disabled={isPreparingPrompt}
+          className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-transparent text-pi-dim transition-colors hover:border-pi-accent/25 hover:bg-pi-accent/10 hover:text-pi-accent disabled:cursor-not-allowed disabled:opacity-50"
+          title={t('agentsRoom.launchFromComposer')}
+        >
+          <Network size={16} />
+        </button>
+
         <div className="flex-1 relative">
           {showFileSearch && (
-            <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-lg">
+            <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-[90] mb-2 overflow-hidden rounded-lg">
               <div className="flex h-8 items-center gap-2 border-b border-pi-border/70 px-3 text-xs text-pi-dim">
                 <Search size={13} className="flex-shrink-0" />
                 <span className="min-w-0 flex-1 truncate">
@@ -858,7 +1138,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             className="pi-glass-control w-full resize-none rounded-lg px-3 py-2
                        text-sm text-pi-text placeholder-pi-dim
                        focus:outline-none focus:border-pi-accent transition-colors
-                       min-h-[40px] max-h-[200px]"
+                       min-h-[40px] max-h-[200px] leading-6"
             style={{ fontFamily: 'inherit' }}
           />
         </div>
@@ -866,7 +1146,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         {isStreaming && (
           <button
             onClick={onStop}
-            className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-pi-error/20 text-pi-error transition-colors hover:bg-pi-error/30"
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-pi-error/20 text-pi-error transition-colors hover:bg-pi-error/30"
             title={t('chat.stopGeneration')}
           >
             <Square size={14} fill="currentColor" />
@@ -878,7 +1158,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             onClick={() => void handleSend()}
             disabled={!canSubmit || isPreparingPrompt}
             className={cn(
-              'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-colors',
+              'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl transition-colors',
               canSubmit && !isPreparingPrompt
                 ? 'bg-pi-accent text-white hover:bg-pi-accent/90'
                 : 'cursor-not-allowed bg-pi-bg-tertiary/70 text-pi-dim'
@@ -931,13 +1211,35 @@ function ComposerControlBar({
 }) {
   const { t } = useI18n();
   const selectedPermission = PERMISSION_MODE_OPTIONS.find((option) => option === permissionMode) ?? PERMISSION_MODE_OPTIONS[0]!;
+  const [compact, setCompact] = useState(false);
+
+  useEffect(() => {
+    const node = refEl.current;
+    if (!node) return;
+
+    const updateCompact = () => {
+      setCompact(node.clientWidth < 520);
+    };
+
+    updateCompact();
+
+    const observer = new ResizeObserver(updateCompact);
+    observer.observe(node);
+    window.addEventListener('resize', updateCompact);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateCompact);
+    };
+  }, [refEl]);
 
   return (
-    <div ref={refEl} className="relative flex items-center gap-1.5 px-3 pt-2">
+    <div ref={refEl} className="relative z-[70] flex min-w-0 items-center gap-1.5 px-3 pt-2">
       <ComposerControlButton
         icon={<Bot size={12} />}
         label={currentModel?.name ?? t('chat.noModel')}
         active={openMenu === 'model'}
+        compact={compact}
         title={t('chat.modelTitle')}
         onClick={() => onToggleMenu('model')}
       />
@@ -945,6 +1247,7 @@ function ComposerControlBar({
         icon={<Shield size={12} />}
         label={permissionModeLabel(selectedPermission, t)}
         active={openMenu === 'permission'}
+        compact={compact}
         tone={permissionMode === 'bypassPermissions' ? 'warning' : undefined}
         title={t('chat.permissionMode')}
         onClick={() => onToggleMenu('permission')}
@@ -953,14 +1256,16 @@ function ComposerControlBar({
         icon={<Brain size={12} />}
         label={thinkingLevelLabel(thinkingLevel, t)}
         active={openMenu === 'thinking'}
+        compact={compact}
         title={t('chat.thinkingLevel')}
         onClick={() => onToggleMenu('thinking')}
       />
-      {activeSession && <WorkspaceSwitcher activeSession={activeSession} placement="toolbar" />}
+      {activeSession && <WorkspaceSwitcher activeSession={activeSession} placement="toolbar" compact={compact} />}
       <button
         onClick={onOpenUsage}
         className={cn(
-          'flex h-7 min-w-0 max-w-[190px] flex-shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+          'flex h-7 min-w-0 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+          compact ? 'max-w-[76px]' : 'max-w-[190px]',
           contextUsage.percent > 85
             ? 'border-pi-error/40 bg-pi-error/10 text-pi-error'
             : contextUsage.percent > 65
@@ -974,7 +1279,7 @@ function ComposerControlBar({
       </button>
 
       {openMenu === 'model' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.modelTitle')}</div>
           <div className="max-h-[280px] overflow-y-auto py-1">
             {availableModels.length === 0 ? (
@@ -1004,7 +1309,7 @@ function ComposerControlBar({
       )}
 
       {openMenu === 'permission' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.permissionTitle')}</div>
           <div className="py-1">
             {PERMISSION_MODE_OPTIONS.map((option) => (
@@ -1028,7 +1333,7 @@ function ComposerControlBar({
       )}
 
       {openMenu === 'thinking' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.thinkingTitle')}</div>
           <div className="grid grid-cols-2 gap-1 p-2">
             {THINKING_LEVELS.map((level) => (
@@ -1057,6 +1362,7 @@ function ComposerControlButton({
   label,
   active,
   tone,
+  compact,
   title,
   onClick,
 }: {
@@ -1064,14 +1370,17 @@ function ComposerControlButton({
   label: string;
   active?: boolean;
   tone?: 'warning';
+  compact?: boolean;
   title: string;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
+      aria-label={title}
       className={cn(
-        'flex h-7 min-w-0 max-w-[180px] items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        'flex h-7 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        compact ? 'w-7 flex-shrink-0 px-0' : 'max-w-[180px]',
         active
           ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
           : tone === 'warning'
@@ -1081,7 +1390,7 @@ function ComposerControlButton({
       title={title}
     >
       <span className="flex-shrink-0">{icon}</span>
-      <span className="truncate">{label}</span>
+      {!compact && <span className="truncate">{label}</span>}
     </button>
   );
 }
@@ -1192,6 +1501,36 @@ function normalizeWorkspacePath(value: string): string {
   return value.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
+function sameWorkspaceRoot(a: string, b: string): boolean {
+  return normalizeComparablePath(a) === normalizeComparablePath(b);
+}
+
+function normalizeComparablePath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/g, '');
+  return isWindowsLikePath(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function isWindowsLikePath(value: string): boolean {
+  return /^[a-zA-Z]:\//.test(value) || value.startsWith('//');
+}
+
+function readPlainDroppedPath(dataTransfer: DataTransfer | null): string | null {
+  if (!dataTransfer || !Array.from(dataTransfer.types).includes('text/plain')) return null;
+  if (dataTransfer.files.length > 0) return null;
+
+  const value = dataTransfer.getData('text/plain').trim();
+  if (!looksLikeWorkspacePath(value)) return null;
+  return value.replace(/^file:\/\//i, '').trim();
+}
+
+function looksLikeWorkspacePath(value: string): boolean {
+  if (!value || /[\r\n]/.test(value)) return false;
+  if (/^[a-z]+:\/\//i.test(value) && !/^file:\/\//i.test(value)) return false;
+  const normalized = value.replace(/^file:\/\//i, '').replace(/\\/g, '/');
+  const name = basename(normalized);
+  return normalized.includes('/') || /^[\w .@()[\]-]+\.[a-zA-Z0-9]{1,12}$/.test(name);
+}
+
 function normalizeLineNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
@@ -1218,6 +1557,13 @@ function basename(value: string): string {
   return normalized.split('/').filter(Boolean).pop() ?? normalized;
 }
 
+function referenceDirectoryLabel(value: string): string {
+  const normalized = normalizeWorkspacePath(value);
+  const parts = normalized.split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/') || normalized;
+}
+
 function escapeAttr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
@@ -1240,7 +1586,7 @@ function localizeFallbackSlashCommands(
 }
 
 function mergeSlashCommands(commands: SlashCommandInfo[], fallbackCommands: SlashCommandInfo[]): SlashCommandInfo[] {
-  const merged = [...commands, ...fallbackCommands];
+  const merged = [...fallbackCommands, ...commands];
   const seen = new Set<string>();
   const result: SlashCommandInfo[] = [];
 
@@ -1299,6 +1645,7 @@ function messageTextLength(message: ChatMessage): number {
   const contentChars = message.content.reduce((total, part) => {
     if (part.type === 'text') return total + (part.text?.length ?? 0);
     if (part.type === 'thinking') return total + (part.thinking?.content.length ?? 0);
+    if (part.type === 'image') return total + Math.ceil((part.image?.data.length ?? 0) * 0.75);
     if (part.type === 'tool_use') return total + JSON.stringify(part.toolUse?.args ?? {}).length;
     if (part.type === 'tool_result') return total + (part.toolResult?.content.length ?? 0);
     return total;
@@ -1331,4 +1678,152 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+interface PromptOptimizationContext {
+  projectName?: string;
+  projectPath?: string;
+  hasFileReferences: boolean;
+  hasImages: boolean;
+}
+
+function optimizePromptDraft(input: string, context: PromptOptimizationContext): string {
+  const task = normalizePromptInput(input);
+  const language = detectPromptLanguage(task);
+  const role = inferPromptRole(task, language);
+  const contextLines = buildPromptContextLines(context, language);
+  const requirements = buildPromptRequirements(task, language);
+  const outputFormat = buildPromptOutputFormat(task, language);
+
+  if (language === 'zh') {
+    return [
+      `请你作为${role}，帮助我完成下面的任务。`,
+      '',
+      '## 目标',
+      task,
+      '',
+      '## 上下文',
+      ...contextLines,
+      '',
+      '## 要求',
+      ...requirements.map((item, index) => `${index + 1}. ${item}`),
+      '',
+      '## 输出格式',
+      ...outputFormat.map((item) => `- ${item}`),
+    ].join('\n');
+  }
+
+  return [
+    `Act as ${role} and help me complete the task below.`,
+    '',
+    '## Goal',
+    task,
+    '',
+    '## Context',
+    ...contextLines,
+    '',
+    '## Requirements',
+    ...requirements.map((item, index) => `${index + 1}. ${item}`),
+    '',
+    '## Output Format',
+    ...outputFormat.map((item) => `- ${item}`),
+  ].join('\n');
+}
+
+function normalizePromptInput(input: string): string {
+  return input
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function detectPromptLanguage(input: string): 'zh' | 'en' {
+  return /[\u3400-\u9fff]/.test(input) ? 'zh' : 'en';
+}
+
+function inferPromptRole(input: string, language: 'zh' | 'en'): string {
+  const lower = input.toLowerCase();
+  const codeTask = /(代码|实现|修复|调试|报错|bug|测试|前端|后端|接口|仓库|项目|重构|code|implement|fix|debug|bug|test|frontend|backend|api|repo|refactor)/i.test(input);
+  const writingTask = /(文档|报告|总结|翻译|润色|readme|doc|report|summary|translate|rewrite|polish)/i.test(input);
+  const dataTask = /(数据|表格|csv|分析|统计|可视化|data|csv|analysis|chart|visuali[sz]e|statistics)/i.test(input);
+  const productTask = /(产品|交互|ui|ux|界面|设计|体验|product|design|interface)/i.test(input);
+
+  if (codeTask) return language === 'zh' ? '资深软件工程师' : 'a senior software engineer';
+  if (dataTask) return language === 'zh' ? '严谨的数据分析专家' : 'a rigorous data analyst';
+  if (productTask || lower.includes('ui')) return language === 'zh' ? '资深产品与交互设计专家' : 'a senior product and UX designer';
+  if (writingTask) return language === 'zh' ? '专业技术写作专家' : 'a technical writing expert';
+  return language === 'zh' ? '专业问题分析与执行专家' : 'an expert problem solver';
+}
+
+function buildPromptContextLines(context: PromptOptimizationContext, language: 'zh' | 'en'): string[] {
+  if (language === 'zh') {
+    const lines = [
+      context.projectName ? `- 当前项目：${context.projectName}` : '- 当前项目：以当前工作区为准',
+      context.projectPath ? `- 工作目录：${context.projectPath}` : '- 工作目录：以当前会话工作区为准',
+    ];
+    if (context.hasFileReferences) lines.push('- 我已附加工作区文件作为上下文，请优先结合文件内容判断。');
+    if (context.hasImages) lines.push('- 我已附加图片作为上下文，请结合图片信息判断。');
+    return lines;
+  }
+
+  const lines = [
+    context.projectName ? `- Current project: ${context.projectName}` : '- Current project: use the active workspace',
+    context.projectPath ? `- Working directory: ${context.projectPath}` : '- Working directory: use the active session workspace',
+  ];
+  if (context.hasFileReferences) lines.push('- Workspace files are attached as context; prioritize their contents.');
+  if (context.hasImages) lines.push('- Images are attached as context; use their visual information when relevant.');
+  return lines;
+}
+
+function buildPromptRequirements(input: string, language: 'zh' | 'en'): string[] {
+  const codeTask = /(代码|实现|修复|调试|报错|bug|测试|前端|后端|接口|仓库|项目|重构|code|implement|fix|debug|bug|test|frontend|backend|api|repo|refactor)/i.test(input);
+  const compareTask = /(比较|对比|差距|评估|compare|contrast|gap|evaluate|review)/i.test(input);
+
+  if (language === 'zh') {
+    const requirements = [
+      '先明确任务目标、关键约束和必要假设；不确定时说明你的判断依据。',
+      '给出可执行的步骤，优先处理最能推进目标的部分。',
+      '保持答案简洁但完整，避免泛泛而谈。',
+    ];
+    if (codeTask) {
+      requirements.push('如果需要改代码，请先阅读相关文件，再做最小必要改动，并保持现有架构和风格一致。');
+      requirements.push('完成后给出验证方式、测试结果和仍需注意的风险。');
+    }
+    if (compareTask) {
+      requirements.push('对比时请列出维度、现状、差距、优先级和下一步建议。');
+    }
+    return requirements;
+  }
+
+  const requirements = [
+    'Clarify the goal, constraints, and necessary assumptions before acting.',
+    'Provide actionable steps and prioritize the work that moves the goal forward fastest.',
+    'Keep the answer concise but complete; avoid generic advice.',
+  ];
+  if (codeTask) {
+    requirements.push('If code changes are needed, inspect the relevant files first, make the smallest useful change, and follow existing architecture and style.');
+    requirements.push('Finish with verification steps, test results, and remaining risks.');
+  }
+  if (compareTask) {
+    requirements.push('For comparisons, include dimensions, current state, gaps, priorities, and recommended next steps.');
+  }
+  return requirements;
+}
+
+function buildPromptOutputFormat(input: string, language: 'zh' | 'en'): string[] {
+  const codeTask = /(代码|实现|修复|调试|bug|测试|code|implement|fix|debug|bug|test)/i.test(input);
+  const compareTask = /(比较|对比|差距|评估|compare|contrast|gap|evaluate|review)/i.test(input);
+
+  if (language === 'zh') {
+    if (compareTask) return ['结论摘要', '详细对比表', '优先级排序', '下一步行动'];
+    if (codeTask) return ['改动摘要', '涉及文件', '验证结果', '后续建议'];
+    return ['关键结论', '具体步骤', '注意事项'];
+  }
+
+  if (compareTask) return ['Executive summary', 'Detailed comparison table', 'Prioritized gaps', 'Next actions'];
+  if (codeTask) return ['Change summary', 'Files touched', 'Verification results', 'Follow-up suggestions'];
+  return ['Key conclusion', 'Concrete steps', 'Important caveats'];
 }

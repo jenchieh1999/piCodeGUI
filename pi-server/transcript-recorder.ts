@@ -1,17 +1,25 @@
 import { appendMessage, replaceMessage } from './persistence.js';
-import type { ChatMessageData, TokenUsageData, ToolResultData, ToolUseData, WsServerMsg } from './types.js';
+import type { ChatMessageData, ImageAttachmentData, MessageContentData, TokenUsageData, ToolResultData, ToolUseData, WsServerMsg } from './types.js';
 
 let recorderMessageCounter = 0;
 
 export class TranscriptRecorder {
   private assistantBySession = new Map<string, ChatMessageData>();
 
-  recordUserPrompt(sessionId: string, text: string): void {
+  recordUserPrompt(sessionId: string, text: string, images?: ImageAttachmentData[]): void {
+    const content: MessageContentData[] = [];
+    if (text.trim()) {
+      content.push({ type: 'text', text });
+    }
+    for (const image of images ?? []) {
+      content.push({ type: 'image', image });
+    }
+
     appendMessage(sessionId, {
       id: nextMessageId('user'),
       sessionId,
       role: 'user',
-      content: [{ type: 'text', text }],
+      content,
       timestamp: Date.now(),
     });
   }

@@ -86,6 +86,23 @@ function cleanInput(input: AgentInput): AgentInput {
     description: input.description?.trim() ?? '',
     systemPrompt: input.systemPrompt?.trim() ?? '',
     enabled: input.enabled,
+    role: input.role,
+    parentAgentId: cleanOptional(input.parentAgentId),
+    subAgent: input.subAgent ? {
+      enabled: Boolean(input.subAgent.enabled),
+      autoDelegate: input.subAgent.autoDelegate !== false,
+      triggers: dedupe(input.subAgent.triggers ?? []),
+      maxParallel: clampNumber(input.subAgent.maxParallel, 1, 8, 3),
+      reviewRequired: input.subAgent.reviewRequired !== false,
+      outputContract: input.subAgent.outputContract?.trim() ?? '',
+    } : undefined,
+    selfImprovement: input.selfImprovement ? {
+      enabled: input.selfImprovement.enabled !== false,
+      captureCorrections: input.selfImprovement.captureCorrections !== false,
+      captureFailures: input.selfImprovement.captureFailures !== false,
+      projectMemory: input.selfImprovement.projectMemory !== false,
+      includeRecentLearnings: input.selfImprovement.includeRecentLearnings !== false,
+    } : undefined,
     modelProvider: cleanOptional(input.modelProvider),
     modelId: cleanOptional(input.modelId),
     projectPath: cleanOptional(input.projectPath),
@@ -100,6 +117,11 @@ function cleanOptional(value: string | undefined): string | undefined {
 
 function dedupe(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function loadAgents(): AgentConfig[] {
@@ -126,6 +148,9 @@ function isAgentLike(value: unknown): value is AgentConfig {
     && typeof agent.description === 'string'
     && typeof agent.systemPrompt === 'string'
     && typeof agent.enabled === 'boolean'
+    && typeof agent.role === 'string'
+    && Boolean(agent.subAgent)
+    && Boolean(agent.selfImprovement)
     && Array.isArray(agent.channelIds)
     && typeof agent.createdAt === 'number'
     && typeof agent.updatedAt === 'number';

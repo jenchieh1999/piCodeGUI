@@ -1,14 +1,19 @@
 import {
   ArrowLeft,
+  BookOpen,
   Bot,
+  Brain,
   Briefcase,
   FolderOpen,
+  Network,
   Plus,
   Power,
   RefreshCw,
   RadioTower,
   Save,
   Settings2,
+  ShieldCheck,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
@@ -17,9 +22,10 @@ import { piApi } from '../../api/client';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
 import { createNewSessionFromPicker, createSessionForProject } from '../../lib/sessionActions';
 import { useAgentStore } from '../../stores/agentStore';
+import { useChatStore } from '../../stores/chatStore';
 import { useModelStore } from '../../stores/modelStore';
 import { useUIStore } from '../../stores/uiStore';
-import type { AgentConfig, ChannelConfig, ModelInfo } from '../../types';
+import type { AgentConfig, AgentLearningRecord, AgentRole, ChannelConfig, ModelInfo } from '../../types';
 import { cn } from '../shared/utils';
 
 interface AgentDraft {
@@ -27,6 +33,23 @@ interface AgentDraft {
   description: string;
   systemPrompt: string;
   enabled: boolean;
+  role: AgentRole;
+  parentAgentId: string;
+  subAgent: {
+    enabled: boolean;
+    autoDelegate: boolean;
+    triggers: string;
+    maxParallel: number;
+    reviewRequired: boolean;
+    outputContract: string;
+  };
+  selfImprovement: {
+    enabled: boolean;
+    captureCorrections: boolean;
+    captureFailures: boolean;
+    projectMemory: boolean;
+    includeRecentLearnings: boolean;
+  };
   modelKey: string;
   projectPath: string;
   channelIds: string[];
@@ -39,6 +62,10 @@ type AgentCardModel = {
   systemPrompt: string;
   enabled: boolean;
   isDefault: boolean;
+  role: AgentRole;
+  parentAgentId?: string;
+  subAgent: AgentConfig['subAgent'];
+  selfImprovement: AgentConfig['selfImprovement'];
   modelProvider?: string;
   modelId?: string;
   projectPath?: string;
@@ -50,6 +77,17 @@ type AgentCardModel = {
 type TFunction = (key: TranslationKey, values?: Record<string, string | number>) => string;
 
 const MAIN_AGENT_ID = 'main-agent';
+const ROLE_OPTIONS: AgentRole[] = ['custom', 'subagent', 'planner', 'implementer', 'reviewer', 'tester', 'documenter', 'researcher'];
+const SELF_IMPROVEMENT_TOGGLES: Array<{
+  key: keyof AgentDraft['selfImprovement'];
+  labelKey: TranslationKey;
+  hintKey: TranslationKey;
+}> = [
+  { key: 'captureCorrections', labelKey: 'agents.captureCorrections', hintKey: 'agents.captureCorrectionsHint' },
+  { key: 'captureFailures', labelKey: 'agents.captureFailures', hintKey: 'agents.captureFailuresHint' },
+  { key: 'projectMemory', labelKey: 'agents.projectMemory', hintKey: 'agents.projectMemoryHint' },
+  { key: 'includeRecentLearnings', labelKey: 'agents.includeRecentLearnings', hintKey: 'agents.includeRecentLearningsHint' },
+];
 
 export function AgentsView() {
   const { t } = useI18n();
@@ -63,6 +101,8 @@ export function AgentsView() {
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const deleteAgent = useAgentStore((s) => s.deleteAgent);
   const toggleAgent = useAgentStore((s) => s.toggleAgent);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const sessions = useChatStore((s) => s.sessions);
   const currentModel = useModelStore((s) => s.currentModel);
   const availableModels = useModelStore((s) => s.availableModels);
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
@@ -71,6 +111,16 @@ export function AgentsView() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentCardModel | null>(null);
   const [draft, setDraft] = useState<AgentDraft>(() => createDraft(t));
+  const [learnings, setLearnings] = useState<AgentLearningRecord[]>([]);
+  const [learningDraft, setLearningDraft] = useState({ title: '', content: '', type: 'insight' as AgentLearningRecord['type'] });
+  const [savingLearning, setSavingLearning] = useState(false);
+
+  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
+  const learningProjectPath = activeSession?.projectPath;
+  const effectiveCurrentModel = useMemo(
+    () => modelForSession(activeSession, availableModels, currentModel),
+    [activeSession?.modelId, activeSession?.modelProvider, availableModels, currentModel]
+  );
 
   const loadChannels = useCallback(async () => {
     setLoadingChannels(true);
@@ -99,6 +149,23 @@ export function AgentsView() {
     });
   }, [addToast, loadAgents, loadChannels, t]);
 
+  const loadLearnings = useCallback(async () => {
+    try {
+      const result = await piApi.getAgentLearnings(learningProjectPath);
+      setLearnings(result.learnings);
+    } catch (err) {
+      addToast({
+        type: 'warning',
+        message: t('agents.learningsLoadFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 5000,
+      });
+    }
+  }, [addToast, learningProjectPath, t]);
+
+  useEffect(() => {
+    void loadLearnings();
+  }, [loadLearnings]);
+
   const cards = useMemo<AgentCardModel[]>(() => {
     const mainAgent: AgentCardModel = {
       id: MAIN_AGENT_ID,
@@ -107,8 +174,11 @@ export function AgentsView() {
       systemPrompt: '',
       enabled: true,
       isDefault: true,
-      modelProvider: currentModel?.provider,
-      modelId: currentModel?.id,
+      role: 'main',
+      subAgent: defaultSubAgentConfig(),
+      selfImprovement: defaultSelfImprovementDraft(),
+      modelProvider: effectiveCurrentModel?.provider,
+      modelId: effectiveCurrentModel?.id,
       projectPath: undefined,
       channelIds: [],
       createdAt: 0,
@@ -119,10 +189,25 @@ export function AgentsView() {
       mainAgent,
       ...agents.map((agent) => ({ ...agent, isDefault: false })),
     ];
-  }, [agents, currentModel?.id, currentModel?.provider, t]);
+  }, [agents, effectiveCurrentModel?.id, effectiveCurrentModel?.provider, t]);
 
   const assignedChannelIds = useMemo(
     () => new Set(agents.flatMap((agent) => agent.channelIds)),
+    [agents]
+  );
+
+  const subAgentCount = useMemo(
+    () => agents.filter((agent) => agent.enabled && agent.subAgent.enabled).length,
+    [agents]
+  );
+
+  const autoDelegationCount = useMemo(
+    () => agents.filter((agent) => agent.enabled && agent.subAgent.enabled && agent.subAgent.autoDelegate).length,
+    [agents]
+  );
+
+  const selfImprovingCount = useMemo(
+    () => agents.filter((agent) => agent.enabled && agent.selfImprovement.enabled).length,
     [agents]
   );
 
@@ -156,6 +241,17 @@ export function AgentsView() {
       description: draft.description,
       systemPrompt: draft.systemPrompt,
       enabled: draft.enabled,
+      role: draft.role,
+      parentAgentId: draft.parentAgentId,
+      subAgent: {
+        enabled: draft.subAgent.enabled,
+        autoDelegate: draft.subAgent.autoDelegate,
+        triggers: splitLines(draft.subAgent.triggers),
+        maxParallel: draft.subAgent.maxParallel,
+        reviewRequired: draft.subAgent.reviewRequired,
+        outputContract: draft.subAgent.outputContract,
+      },
+      selfImprovement: draft.selfImprovement,
       modelProvider: model?.provider,
       modelId: model?.id,
       projectPath: draft.projectPath,
@@ -200,6 +296,27 @@ export function AgentsView() {
       await toggleAgent(agent.id, !agent.enabled);
     } catch (err) {
       addToast({ type: 'error', message: err instanceof Error ? err.message : String(err), duration: 6000 });
+    }
+  };
+
+  const saveLearning = async () => {
+    if (!learningDraft.content.trim()) return;
+    setSavingLearning(true);
+    try {
+      const result = await piApi.createAgentLearning({
+        type: learningDraft.type,
+        title: learningDraft.title.trim() || t('agents.learningUntitled'),
+        content: learningDraft.content,
+        projectPath: learningProjectPath,
+        tags: ['manual'],
+      });
+      setLearnings((current) => [result.learning, ...current]);
+      setLearningDraft({ title: '', content: '', type: 'insight' });
+      addToast({ type: 'success', message: t('agents.learningSaved') });
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : String(err), duration: 6000 });
+    } finally {
+      setSavingLearning(false);
     }
   };
 
@@ -255,12 +372,33 @@ export function AgentsView() {
           </div>
         </div>
 
+        <div className="mt-8 grid gap-3 md:grid-cols-3">
+          <CapabilityTile
+            icon={<Network size={16} />}
+            label={t('agents.capability.subagents')}
+            value={t('agents.capability.subagentsValue', { count: subAgentCount })}
+            hint={t('agents.capability.subagentsHint', { count: autoDelegationCount })}
+          />
+          <CapabilityTile
+            icon={<Brain size={16} />}
+            label={t('agents.capability.autoPlan')}
+            value={t('agents.capability.autoPlanValue')}
+            hint={t('agents.capability.autoPlanHint')}
+          />
+          <CapabilityTile
+            icon={<BookOpen size={16} />}
+            label={t('agents.capability.selfImprove')}
+            value={t('agents.capability.selfImproveValue', { count: selfImprovingCount })}
+            hint={t('agents.capability.selfImproveHint', { count: learnings.length })}
+          />
+        </div>
+
         <div className="mt-10 space-y-4">
           {cards.map((agent) => (
             <AgentCard
               key={agent.id}
               agent={agent}
-              currentModel={currentModel}
+              currentModel={effectiveCurrentModel}
               availableModels={availableModels}
               channels={channels}
               assignedChannelIds={assignedChannelIds}
@@ -271,6 +409,16 @@ export function AgentsView() {
             />
           ))}
         </div>
+
+        <LearningPanel
+          projectPath={learningProjectPath}
+          learnings={learnings}
+          draft={learningDraft}
+          setDraft={setLearningDraft}
+          saving={savingLearning}
+          onSave={() => void saveLearning()}
+          onRefresh={() => void loadLearnings()}
+        />
       </div>
 
       {editorOpen && (
@@ -307,6 +455,126 @@ export function AgentsView() {
   );
 }
 
+function CapabilityTile({
+  icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-pi-border bg-pi-bg-secondary p-4">
+      <div className="flex items-center gap-2 text-pi-accent">
+        {icon}
+        <span className="text-[10px] font-semibold uppercase text-pi-dim">{label}</span>
+      </div>
+      <div className="mt-2 text-sm font-semibold text-pi-text">{value}</div>
+      <div className="mt-1 text-[11px] leading-relaxed text-pi-muted">{hint}</div>
+    </div>
+  );
+}
+
+function LearningPanel({
+  projectPath,
+  learnings,
+  draft,
+  setDraft,
+  saving,
+  onSave,
+  onRefresh,
+}: {
+  projectPath?: string;
+  learnings: AgentLearningRecord[];
+  draft: { title: string; content: string; type: AgentLearningRecord['type'] };
+  setDraft: Dispatch<SetStateAction<{ title: string; content: string; type: AgentLearningRecord['type'] }>>;
+  saving: boolean;
+  onSave: () => void;
+  onRefresh: () => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className="mt-8 rounded-2xl border border-pi-border bg-pi-bg-secondary p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-pi-text">
+            <Sparkles size={16} className="text-pi-accent" />
+            {t('agents.learningsTitle')}
+          </div>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-pi-muted">
+            {projectPath ? t('agents.learningsProjectHint', { path: projectPath }) : t('agents.learningsGlobalHint')}
+          </p>
+        </div>
+        <button
+          onClick={onRefresh}
+          className="flex h-8 items-center gap-1.5 rounded-md border border-pi-border px-3 text-xs text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+        >
+          <RefreshCw size={13} />
+          {t('common.refresh')}
+        </button>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-[160px_minmax(0,1fr)_96px]">
+        <select
+          value={draft.type}
+          onChange={(event) => setDraft((current) => ({ ...current, type: event.target.value as AgentLearningRecord['type'] }))}
+          className={inputClass}
+        >
+          <option value="insight">{t('agents.learningType.insight')}</option>
+          <option value="correction">{t('agents.learningType.correction')}</option>
+          <option value="failure">{t('agents.learningType.failure')}</option>
+          <option value="preference">{t('agents.learningType.preference')}</option>
+          <option value="workflow">{t('agents.learningType.workflow')}</option>
+        </select>
+        <input
+          value={draft.title}
+          onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+          placeholder={t('agents.learningTitlePlaceholder')}
+          className={inputClass}
+        />
+        <button
+          onClick={onSave}
+          disabled={saving || !draft.content.trim()}
+          className="flex h-8 items-center justify-center gap-1.5 rounded-md bg-pi-accent px-3 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          <Save size={13} />
+          {t('common.save')}
+        </button>
+      </div>
+      <textarea
+        value={draft.content}
+        onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+        rows={3}
+        placeholder={t('agents.learningContentPlaceholder')}
+        className="mt-2 w-full resize-y rounded-md border border-pi-border bg-pi-bg-tertiary px-3 py-2 text-xs leading-relaxed text-pi-text placeholder:text-pi-dim focus:border-pi-accent focus:outline-none"
+      />
+
+      <div className="mt-4 grid gap-2 md:grid-cols-2">
+        {learnings.slice(0, 6).map((learning) => (
+          <div key={learning.id} className="rounded-xl border border-pi-border bg-pi-bg-tertiary p-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="min-w-0 truncate text-xs font-semibold text-pi-text">{learning.title}</span>
+              <span className="rounded-full bg-pi-bg-secondary px-2 py-0.5 text-[9px] uppercase text-pi-dim">
+                {t(`agents.learningType.${learning.type}` as TranslationKey)}
+              </span>
+            </div>
+            <p className="mt-2 line-clamp-3 text-[11px] leading-relaxed text-pi-muted">{learning.content}</p>
+          </div>
+        ))}
+        {learnings.length === 0 && (
+          <div className="rounded-xl border border-dashed border-pi-border px-3 py-6 text-center text-xs text-pi-dim md:col-span-2">
+            {t('agents.learningsEmpty')}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AgentCard({
   agent,
   currentModel,
@@ -334,7 +602,7 @@ function AgentCard({
     ? channels.filter((channel) => !assignedChannelIds.has(channel.id)).length
     : 0;
   const modelLabel = agent.modelId
-    ? `${agent.modelProvider ? `${agent.modelProvider}/` : ''}${modelName(agent.modelId, currentModel, availableModels)}`
+    ? `${agent.modelProvider ? `${agent.modelProvider}/` : ''}${modelName(agent.modelId, agent.modelProvider, currentModel, availableModels)}`
     : t('common.inherit');
   const channelsLabel = boundChannels.length > 0
     ? boundChannels.map((channel) => channel.name).join(', ')
@@ -367,6 +635,14 @@ function AgentCard({
                 {agent.enabled ? t('common.enabled') : t('common.disabled')}
               </span>
             )}
+            <span className="rounded-full bg-pi-bg-tertiary px-2 py-0.5 text-[10px] font-semibold text-pi-muted">
+              {t(`agents.role.${agent.role}` as TranslationKey)}
+            </span>
+            {agent.subAgent.enabled && (
+              <span className="rounded-full bg-pi-accent/10 px-2 py-0.5 text-[10px] font-semibold text-pi-accent">
+                {agent.subAgent.autoDelegate ? t('agents.autoSubagent') : t('agents.manualSubagent')}
+              </span>
+            )}
           </div>
           <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-pi-muted">{agent.description}</p>
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-pi-muted">
@@ -374,6 +650,12 @@ function AgentCard({
               {t('agents.modelLine', { model: modelLabel })}
               {agent.isDefault ? ` ${t('agents.inheritedSuffix')}` : ''}
             </span>
+            {!agent.isDefault && agent.selfImprovement.enabled && (
+              <span className="inline-flex items-center gap-1">
+                <ShieldCheck size={12} />
+                {t('agents.selfImprovementOn')}
+              </span>
+            )}
             <span>{t('agents.channelsLine', { channels: channelsLabel })}</span>
             {agent.projectPath && (
               <span className="inline-flex min-w-0 items-center gap-1">
@@ -478,6 +760,31 @@ function AgentEditor({
               </select>
             </Field>
 
+            <Field label={t('agents.role')}>
+              <select
+                value={draft.role}
+                onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value as AgentRole }))}
+                className={inputClass}
+              >
+                {ROLE_OPTIONS.map((role) => (
+                  <option key={role} value={role}>{t(`agents.role.${role}` as TranslationKey)}</option>
+                ))}
+              </select>
+            </Field>
+
+            <Field label={t('agents.parentAgent')}>
+              <select
+                value={draft.parentAgentId}
+                onChange={(event) => setDraft((current) => ({ ...current, parentAgentId: event.target.value }))}
+                className={inputClass}
+              >
+                <option value="">{t('agents.noParent')}</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>{agent.name}</option>
+                ))}
+              </select>
+            </Field>
+
             <Field label={t('agents.field.description')} wide>
               <input
                 value={draft.description}
@@ -544,6 +851,79 @@ function AgentEditor({
               </div>
             </Field>
 
+            <div className="md:col-span-2 rounded-xl border border-pi-border bg-pi-bg-tertiary p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-pi-text">{t('agents.subagentTitle')}</div>
+                  <div className="mt-0.5 text-[10px] text-pi-dim">{t('agents.subagentHint')}</div>
+                </div>
+                <ToggleSwitch
+                  enabled={draft.subAgent.enabled}
+                  onClick={() => setDraft((current) => ({
+                    ...current,
+                    subAgent: { ...current.subAgent, enabled: !current.subAgent.enabled },
+                  }))}
+                />
+              </div>
+              {draft.subAgent.enabled && (
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <InlineToggle
+                    label={t('agents.autoDelegate')}
+                    hint={t('agents.autoDelegateHint')}
+                    enabled={draft.subAgent.autoDelegate}
+                    onClick={() => setDraft((current) => ({
+                      ...current,
+                      subAgent: { ...current.subAgent, autoDelegate: !current.subAgent.autoDelegate },
+                    }))}
+                  />
+                  <InlineToggle
+                    label={t('agents.reviewRequired')}
+                    hint={t('agents.reviewRequiredHint')}
+                    enabled={draft.subAgent.reviewRequired}
+                    onClick={() => setDraft((current) => ({
+                      ...current,
+                      subAgent: { ...current.subAgent, reviewRequired: !current.subAgent.reviewRequired },
+                    }))}
+                  />
+                  <Field label={t('agents.maxParallel')}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={8}
+                      value={draft.subAgent.maxParallel}
+                      onChange={(event) => setDraft((current) => ({
+                        ...current,
+                        subAgent: { ...current.subAgent, maxParallel: Number(event.target.value) },
+                      }))}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label={t('agents.triggers')}>
+                    <input
+                      value={draft.subAgent.triggers}
+                      onChange={(event) => setDraft((current) => ({
+                        ...current,
+                        subAgent: { ...current.subAgent, triggers: event.target.value },
+                      }))}
+                      placeholder={t('agents.triggersPlaceholder')}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label={t('agents.outputContract')} wide>
+                    <textarea
+                      value={draft.subAgent.outputContract}
+                      onChange={(event) => setDraft((current) => ({
+                        ...current,
+                        subAgent: { ...current.subAgent, outputContract: event.target.value },
+                      }))}
+                      rows={2}
+                      className="w-full resize-y rounded-md border border-pi-border bg-pi-bg-secondary px-3 py-2 text-xs leading-relaxed text-pi-text placeholder:text-pi-dim focus:border-pi-accent focus:outline-none"
+                    />
+                  </Field>
+                </div>
+              )}
+            </div>
+
             <Field label={t('agents.systemPrompt')} wide>
               <textarea
                 value={draft.systemPrompt}
@@ -553,6 +933,41 @@ function AgentEditor({
                 className="w-full resize-y rounded-md border border-pi-border bg-pi-bg-tertiary px-3 py-2 text-xs leading-relaxed text-pi-text placeholder:text-pi-dim focus:border-pi-accent focus:outline-none"
               />
             </Field>
+
+            <div className="md:col-span-2 rounded-xl border border-pi-border bg-pi-bg-tertiary p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-pi-text">{t('agents.selfImproveTitle')}</div>
+                  <div className="mt-0.5 text-[10px] text-pi-dim">{t('agents.selfImproveHint')}</div>
+                </div>
+                <ToggleSwitch
+                  enabled={draft.selfImprovement.enabled}
+                  onClick={() => setDraft((current) => ({
+                    ...current,
+                    selfImprovement: { ...current.selfImprovement, enabled: !current.selfImprovement.enabled },
+                  }))}
+                />
+              </div>
+              {draft.selfImprovement.enabled && (
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  {SELF_IMPROVEMENT_TOGGLES.map((item) => (
+                    <InlineToggle
+                      key={item.key}
+                      label={t(item.labelKey)}
+                      hint={t(item.hintKey)}
+                      enabled={draft.selfImprovement[item.key]}
+                      onClick={() => setDraft((current) => ({
+                        ...current,
+                        selfImprovement: {
+                          ...current.selfImprovement,
+                          [item.key]: !current.selfImprovement[item.key],
+                        },
+                      }))}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div className="md:col-span-2 flex items-center justify-between rounded-md border border-pi-border bg-pi-bg-tertiary px-3 py-2">
               <div>
@@ -661,12 +1076,66 @@ function Field({ label, wide, children }: { label: string; wide?: boolean; child
   );
 }
 
+function InlineToggle({
+  label,
+  hint,
+  enabled,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  enabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-pi-border bg-pi-bg-secondary px-3 py-2">
+      <div className="min-w-0">
+        <div className="text-xs font-medium text-pi-text">{label}</div>
+        <div className="mt-0.5 text-[10px] leading-relaxed text-pi-dim">{hint}</div>
+      </div>
+      <ToggleSwitch enabled={enabled} onClick={onClick} />
+    </div>
+  );
+}
+
+function defaultSubAgentConfig(): AgentConfig['subAgent'] {
+  return {
+    enabled: false,
+    autoDelegate: true,
+    triggers: ['complex task', 'implementation', 'debug', 'review', 'test'],
+    maxParallel: 3,
+    reviewRequired: true,
+    outputContract: 'Return concise findings, changed files, risks, and verification steps.',
+  };
+}
+
+function defaultSelfImprovementDraft(): AgentConfig['selfImprovement'] {
+  return {
+    enabled: true,
+    captureCorrections: true,
+    captureFailures: true,
+    projectMemory: true,
+    includeRecentLearnings: true,
+  };
+}
+
 function createDraft(t: TFunction, name?: string, visible = true): AgentDraft {
   return {
     name: visible ? (name ?? t('agents.defaultDraftName')) : '',
     description: visible ? t('agents.defaultDraftDescription') : '',
     systemPrompt: '',
     enabled: true,
+    role: 'custom',
+    parentAgentId: '',
+    subAgent: {
+      enabled: false,
+      autoDelegate: true,
+      triggers: 'complex task, implementation, debug, review, test',
+      maxParallel: 3,
+      reviewRequired: true,
+      outputContract: t('agents.defaultOutputContract'),
+    },
+    selfImprovement: defaultSelfImprovementDraft(),
     modelKey: '',
     projectPath: '',
     channelIds: [],
@@ -679,6 +1148,17 @@ function draftFromAgent(agent: AgentCardModel): AgentDraft {
     description: agent.description,
     systemPrompt: agent.systemPrompt,
     enabled: agent.enabled,
+    role: agent.role,
+    parentAgentId: agent.parentAgentId ?? '',
+    subAgent: {
+      enabled: agent.subAgent.enabled,
+      autoDelegate: agent.subAgent.autoDelegate,
+      triggers: agent.subAgent.triggers.join(', '),
+      maxParallel: agent.subAgent.maxParallel,
+      reviewRequired: agent.subAgent.reviewRequired,
+      outputContract: agent.subAgent.outputContract,
+    },
+    selfImprovement: agent.selfImprovement,
     modelKey: agent.modelProvider && agent.modelId ? `${agent.modelProvider}/${agent.modelId}` : '',
     projectPath: agent.projectPath ?? '',
     channelIds: agent.channelIds,
@@ -696,9 +1176,26 @@ function modelFromKey(value: string, models: ModelInfo[]): ModelInfo | undefined
   return models.find((model) => model.provider === provider && model.id === id);
 }
 
-function modelName(modelId: string, currentModel: ModelInfo | null, availableModels: ModelInfo[]): string {
-  if (currentModel?.id === modelId) return currentModel.name;
-  const model = availableModels.find((item) => item.id === modelId);
+function splitLines(value: string): string[] {
+  return Array.from(new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)));
+}
+
+function modelForSession(
+  session: { modelProvider?: string; modelId?: string } | undefined,
+  models: ModelInfo[],
+  fallback: ModelInfo | null
+): ModelInfo | null {
+  if (!session?.modelId) return fallback;
+  const provider = session.modelProvider;
+  return models.find((model) => model.id === session.modelId && (!provider || model.provider === provider))
+    ?? models.find((model) => model.id === session.modelId)
+    ?? fallback;
+}
+
+function modelName(modelId: string, provider: string | undefined, currentModel: ModelInfo | null, availableModels: ModelInfo[]): string {
+  if (currentModel?.id === modelId && (!provider || currentModel.provider === provider)) return currentModel.name;
+  const model = availableModels.find((item) => item.id === modelId && (!provider || item.provider === provider))
+    ?? availableModels.find((item) => item.id === modelId);
   if (model) return model.name;
   return modelId;
 }

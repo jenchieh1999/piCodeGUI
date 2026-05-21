@@ -1,6 +1,6 @@
 appId: works.pi-agent.desktop
 productName: Pi Agent Desktop
-artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+artifactName: Pi-Agent-Desktop-${version}-${os}-${arch}.${ext}
 directories:
   output: release
 files:
@@ -8,12 +8,20 @@ files:
   - desktop/**/*
   - frontend/dist/**/*
   - pi-server/dist/**/*
+extraResources:
+  - from: node_modules/@earendil-works/pi-coding-agent/examples/extensions
+    to: app.asar.unpacked/node_modules/@earendil-works/pi-coding-agent/examples/extensions
+    filter:
+      - "**/*"
 asar: true
 asarUnpack:
   - pi-server/dist/**/*
   - node_modules/**/*
+afterPack: scripts/apply-windows-icon.cjs
 npmRebuild: false
 nodeGypRebuild: false
+toolsets:
+  winCodeSign: 1.1.0
 win:
   icon: desktop/assets/pi-icon.ico
   signAndEditExecutable: false
@@ -23,6 +31,9 @@ win:
         - x64
         - ia32
 nsis:
+  installerIcon: desktop/assets/pi-icon.ico
+  uninstallerIcon: desktop/assets/pi-icon.ico
+  buildUniversalInstaller: true
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

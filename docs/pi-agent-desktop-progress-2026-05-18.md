@@ -305,3 +305,72 @@
 | `npm.cmd run build` | 通过，仍有 Vite 大 chunk warning |
 | `npm.cmd run server:smoke` | 通过 |
 | `npm.cmd run desktop:smoke` | 通过 |
+## 2026-05-20 扩展、包、技能能力专项推进
+
+本轮新增专项方案文档：[pi-agent-extension-package-skill-implementation-plan.md](./pi-agent-extension-package-skill-implementation-plan.md)。
+
+当前进度更新：
+
+| 模块 | 当前状态 | 本轮目标 |
+| --- | --- | --- |
+| Packages | 已有 UI 和 WebSocket 消息，但服务端仍是 mock map | 接入 `DefaultPackageManager`，支持真实安装、卸载、更新、刷新 |
+| Skills | 已有列表和筛选，但数据未进入真实运行时 | 接入 `DefaultResourceLoader`，真实发现 `SKILL.md` 并下发 `/skill:name` 命令 |
+| Extensions | 已有展示入口，本地开关不持久化 | 展示真实 extensions、注册能力和加载错误 |
+| Prompts | slash command 只接 mock package prompts | 接入 SDK prompt templates |
+| Runtime | `PiAgentRuntime` 可创建 SDK session，但未传入 resource loader | 创建会话时使用当前项目的 `ResourceLoader` |
+| Diagnostics | 缺少资源诊断面 | 下发 resource diagnostics，作为后续 UI 诊断基础 |
+
+阶段评分更新：
+
+| 维度 | 当前评分 | 目标评分 | 说明 |
+| --- | ---: | ---: | --- |
+| 扩展中心真实可用度 | 35 | 70 | 从展示型壳切到 SDK-backed 资源中心 |
+| pi-agent 原生特性保真度 | 62 | 78 | packages、skills、prompts、extensions 将进入真实运行时 |
+| 与 cc-haha/ClawX 扩展体验差距 | 48 | 68 | 先补主链路，再补 marketplace、详情、诊断、权限信任 |
+| 发布质量 | 84 | 86 | 若 typecheck/build 通过，资源主链路进入可验证状态 |
+
+### 2026-05-20 实现结果
+
+| 模块 | 已落地内容 |
+| --- | --- |
+| 服务端资源中心 | 新增 `pi-server/extension-service.ts`，基于 `DefaultPackageManager`、`DefaultResourceLoader`、`SettingsManager` 提供真实资源快照 |
+| HTTP API | 新增 `/api/extensions/resources`、`/api/extensions/reload`、`/api/extensions/packages/install/remove/update`、`/api/extensions/skills/content` |
+| WebSocket 协议 | 新增 `skills_updated`、`prompts_updated`、`resource_diagnostics_updated`、`package_progress`，扩展 package 操作支持 scope/projectPath |
+| Runtime 接入 | `PiAgentRuntime` 创建 SDK session 时传入当前项目的 `resourceLoader/settingsManager/agentDir`，资源版本变化后自动重建 runtime session |
+| Slash Commands | skills、prompt templates、extension commands 与内置命令合并下发，`/skill:name` 进入桌面端命令体系 |
+| Packages UI | 支持输入 npm/git/local 来源安装，选择 user/project 作用域，刷新、更新、卸载，展示资源数量和进度 |
+| Extensions UI | 展示真实 extension 列表、tools、commands、flags、shortcuts 和诊断 |
+| Skills UI | 展示真实 skills，支持刷新和预览 `SKILL.md` 内容 |
+
+### 2026-05-20 验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm.cmd run typecheck` | 通过 |
+| `npm.cmd run build` | 通过 |
+| `npm.cmd run typecheck:server` | 通过 |
+| `npm.cmd run server:smoke` | 通过 |
+
+剩余风险：
+
+- package marketplace、skill 创建器、扩展 UI widget 渲染、resource enable/disable filtering 仍在 P1/P2。
+- 已安装 package 的第三方代码仍需用户自行确认信任来源；后续应补“信任中心/签名/来源评分”。
+- 中文翻译历史文件存在部分旧编码痕迹，本轮新增英文 key 已可用，后续需要系统性清理多语言文案。
+
+## 2026-05-20 Provider 代理配置与 Tauri 迁移评估
+
+本轮继续缩小与 cc-haha 的发布级差距，重点完成两项工作：
+
+1. Provider baseURL/proxy 配置落地。
+   - 后端统一 `PI_AGENT_DIR`、`auth.json`、`models.json` 路径。
+   - 新增 `/api/auth/provider-config` 保存/清除接口。
+   - SDK provider catalog 与 runtime session 均读取同一个 `models.json`。
+   - 设置页凭据模块新增 endpoint/proxy 输入、应用、清除、状态展示。
+   - `protocol-smoke` 增加 endpoint 保存/清除回归，且使用临时 `PI_AGENT_DIR`。
+
+2. Electron 到 Tauri 的必要性评估。
+   - 当前结论：短期继续 Electron，不立即迁移。
+   - 原因：现有 Electron 壳已承载 sidecar、鉴权、窗口/标签、托盘、自动更新、PTY 终端和 packaged smoke，迁移会重建桌面运行时。
+   - 推荐路线：Electron 主线继续追平 cc-haha；Tauri 只开 feasibility spike 验证窗口、sidecar、token 注入、WebSocket、独立窗口和 Windows x64/ia32 打包。
+
+详细评估文档：`docs/electron-to-tauri-migration-assessment.md`。

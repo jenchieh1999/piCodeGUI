@@ -1,15 +1,16 @@
 import { create } from 'zustand';
 import type { AppSettings } from '../types';
+import { DEFAULT_THEME_NAME } from '../lib/runtimeSettings';
 
 export const SETTINGS_STORAGE_KEY = 'pi-desktop-settings';
 export const SETTINGS_BROADCAST_CHANNEL = 'pi-desktop-settings';
 
 const DEFAULT: AppSettings = {
-  theme: 'dark',
+  theme: DEFAULT_THEME_NAME,
   language: 'en',
   fontSize: 13,
   fontFamily: "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-  monoFontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace",
+  monoFontFamily: "'SF Mono', 'SFMono-Regular', ui-monospace, 'Cascadia Code', 'Cascadia Mono', Menlo, Monaco, Consolas, monospace",
   permissionMode: 'ask',
   sidebarWidth: 280,
   rightPanelWidth: 380,
@@ -51,6 +52,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   resetSettings: () => {
     set(DEFAULT);
     localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    document.documentElement.style.fontSize = `${DEFAULT.fontSize}px`;
     broadcastSettingsChanged();
   },
 }));
