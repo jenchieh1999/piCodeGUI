@@ -71,7 +71,7 @@ export function WorkspaceQuickOpen({ sessionId, onClose }: WorkspaceQuickOpenPro
             setLoading(false);
           }
         });
-    }, 90);
+    }, 160);
 
     return () => window.clearTimeout(timer);
   }, [query, sessionId, t]);

@@ -5,6 +5,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { piApi } from '../../api/client';
 import { cn } from '../shared/utils';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
+import { thinkingLevelPillClass } from '../../lib/thinkingLevelStyles';
 import type { ModelInfo, Session, ThinkingLevel } from '../../types';
 import {
   Circle,
@@ -31,15 +32,6 @@ export function StatusBar() {
   const currentModel = modelForSession(activeSession, availableModels, globalCurrentModel);
   const thinkingLevel = activeSession?.thinkingLevel ?? globalThinkingLevel;
   const isDesktop = typeof window !== 'undefined' && Boolean(window.piDesktop);
-
-  const thinkingColors: Record<string, string> = {
-    off: 'text-pi-thinking-off',
-    minimal: 'text-pi-thinking-minimal',
-    low: 'text-pi-thinking-low',
-    medium: 'text-pi-thinking-medium',
-    high: 'text-pi-thinking-high',
-    xhigh: 'text-pi-thinking-xhigh',
-  };
 
   const thinkingLabel = thinkingLevelLabel(thinkingLevel, t);
 
@@ -93,8 +85,8 @@ export function StatusBar() {
         <button
           onClick={nextThinkingLevel}
           className={cn(
-            'flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 transition-colors hover:bg-pi-bg-hover/70 hover:text-pi-text',
-            thinkingColors[thinkingLevel]
+            'flex cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 transition-colors',
+            thinkingLevelPillClass(thinkingLevel)
           )}
           title={t('status.thinkingCycle', { level: thinkingLabel })}
         >

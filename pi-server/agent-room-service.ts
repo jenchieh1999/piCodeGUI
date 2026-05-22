@@ -5,6 +5,7 @@ import { buildAgentRoomPrompts, type AgentRoomPromptKind } from './agent-room-pr
 import { completeAgentRoomStep } from './agent-room-model-service.js';
 import { getDataDir } from './persistence.js';
 import { readWorkspaceFile, searchWorkspaceFiles } from './workspace-service.js';
+import { formatWebSearchResultsAsMarkdown, getWebSearchStatus, searchWeb, type WebSearchResultData } from './web-search-service.js';
 import type {
   AgentRoomArtifactData,
   AgentRoomCitationData,
@@ -12,6 +13,8 @@ import type {
   AgentRoomCreateInputData,
   AgentRoomData,
   AgentRoomGroupData,
+  AgentRoomInterventionInputData,
+  AgentRoomInterventionResultData,
   AgentRoomMessageData,
   AgentRoomModeData,
   AgentRoomRunData,
@@ -62,6 +65,13 @@ type ArtifactSourceInfo = GeneratedText | {
   source: 'workspace';
   title: string;
   path?: string;
+  citations?: AgentRoomCitationData[];
+} | {
+  source: 'web';
+  title: string;
+  provider?: string;
+  results: WebSearchResultData[];
+  citations?: AgentRoomCitationData[];
 };
 
 interface GenerateStepInput {
@@ -76,6 +86,37 @@ interface GenerateStepInput {
   fallback: string;
   signal: AbortSignal;
   maxTokens?: number;
+}
+
+type AgentRoomTaskGroup = Exclude<AgentRoomGroupData, 'system'>;
+
+interface TaskGraphOptions {
+  nodeId?: string;
+  dependencies?: string[];
+  sourceArtifactIds?: string[];
+  purpose?: 'quick' | 'deep';
+  retryCount?: number;
+}
+
+interface TaskCompletion {
+  taskId: string;
+  artifactId?: string;
+}
+
+interface GroupWorkResult {
+  searcher: TaskCompletion;
+  reader: TaskCompletion;
+  organizer: TaskCompletion;
+  argument: TaskCompletion;
+  counterargument: TaskCompletion;
+  lead: TaskCompletion;
+}
+
+interface NeutralReviewResult {
+  fact: TaskCompletion;
+  logic: TaskCompletion;
+  risk: TaskCompletion;
+  product: TaskCompletion;
 }
 
 const storePath = path.join(getDataDir(), 'agent-rooms.json');
@@ -176,6 +217,11 @@ async function handleAgentRoomRequest(
       if (!result) return json(404, { error: 'Agent room run not found' });
       options.broadcast({ type: 'agent_room_run_cancelled', room: result.room, run: result.run });
       return json(200, result);
+    }
+
+    if (parts.length === 4 && parts[3] === 'interventions' && req.method === 'POST') {
+      const result = await applyIntervention(roomId, await readJsonBody<AgentRoomInterventionInputData>(req), options);
+      return result ? json(200, result) : json(404, { error: 'Agent room run not found' });
     }
 
     return json(404, { error: 'Agent room endpoint not found' });
@@ -302,7 +348,7 @@ function startRun(roomId: string, options: AgentRoomServiceOptions): { room: Age
   const abortController = new AbortController();
   activeRuns.set(run.id, abortController);
   options.broadcast({ type: 'agent_room_run_started', room, run });
-  void runAgentRoom(room.id, run.id, options, abortController.signal)
+  void runAgentRoomV2(room.id, run.id, options, abortController.signal)
     .catch((err) => {
       if ((err as Error).name === 'AbortError') return;
       failRun(room.id, run.id, err instanceof Error ? err.message : String(err), options);
@@ -329,7 +375,62 @@ function cancelRun(roomId: string, runId: string): { room: AgentRoomData; run: A
   return { room, run };
 }
 
-async function runAgentRoom(
+async function applyIntervention(
+  roomId: string,
+  input: AgentRoomInterventionInputData,
+  options: AgentRoomServiceOptions,
+): Promise<AgentRoomInterventionResultData | null> {
+  const store = readStore();
+  const room = store.rooms.find((item) => item.id === roomId);
+  const run = latestRunForRoom(store, roomId);
+  if (!room || !run) return null;
+
+  const messages: AgentRoomMessageData[] = [];
+  const artifacts: AgentRoomArtifactData[] = [];
+  const tasks: AgentRoomTaskData[] = [];
+
+  if (input.action === 'add_note') {
+    const note = normalizeString(input.note ?? input.instruction);
+    if (!note) throw new Error('Intervention note is required.');
+    const message = addMessage(
+      room.id,
+      run.id,
+      'system',
+      'User Note',
+      'User Intervention',
+      run.currentStage,
+      ['## User note', '', note].join('\n'),
+      options,
+      run.currentRound || undefined,
+    );
+    messages.push(message);
+    touchAgentRoom(room.id, options);
+    return interventionResult(room.id, run.id, messages, artifacts, tasks);
+  }
+
+  if (input.action === 'add_evidence') {
+    const group = input.group === 'right' ? 'right' : 'left';
+    const instruction = normalizeString(input.instruction ?? input.note) ?? '';
+    const result = await runSupplementalEvidence(room, run, group, instruction, options);
+    messages.push(result.message);
+    artifacts.push(result.artifact);
+    tasks.push(result.task);
+    return interventionResult(room.id, run.id, messages, artifacts, tasks);
+  }
+
+  if (input.action === 'rerun_final') {
+    const instruction = normalizeString(input.instruction ?? input.note) ?? '';
+    const result = await rerunFinalSynthesis(room, run, instruction, options);
+    messages.push(result.message);
+    artifacts.push(result.artifact);
+    tasks.push(result.task);
+    return interventionResult(room.id, run.id, messages, artifacts, tasks);
+  }
+
+  throw new Error(`Unsupported intervention action: ${String(input.action)}`);
+}
+
+async function runAgentRoomV2(
   roomId: string,
   runId: string,
   options: AgentRoomServiceOptions,
@@ -340,6 +441,253 @@ async function runAgentRoom(
   const context: RunContext = { usage: { ...EMPTY_USAGE }, modelFailures: [], modelSuccesses: 0, fallbackSteps: [] };
 
   await setStage(roomId, runId, 'planning', 'planning', options, signal);
+  const moderatorTask = addTask(
+    roomId,
+    runId,
+    'moderator',
+    'Moderator',
+    'Problem framing and task plan',
+    room.question,
+    options,
+    { nodeId: 'moderator.plan', purpose: 'quick' },
+  );
+  const moderator = await generateStep({
+    room,
+    runId,
+    context,
+    kind: 'moderator',
+    purpose: 'quick',
+    fallback: fallbackModeratorPlan(room),
+    signal,
+    maxTokens: 1800,
+  });
+  addMessage(roomId, runId, 'moderator', 'Moderator', 'Moderator', 'planning', withFallbackNote(moderator), options);
+  finishTask(moderatorTask.id, [], options);
+
+  const workspaceEvidence = collectWorkspaceEvidence(room, runId, options, [moderatorTask.id]);
+  const webEvidence = await collectWebEvidence(
+    room,
+    runId,
+    options,
+    [moderatorTask.id, workspaceEvidence?.taskId].filter(Boolean) as string[],
+    signal,
+  );
+  const evidenceArtifactIds = [workspaceEvidence?.artifactId, webEvidence?.artifactId].filter(Boolean) as string[];
+  const researchDependencies = [moderatorTask.id, workspaceEvidence?.taskId, webEvidence?.taskId].filter(Boolean) as string[];
+
+  await sleep(160, signal);
+  await setStage(roomId, runId, 'left_research', 'researching', options, signal);
+  const leftGroupPromise = completeGroupInternalWork(
+    room,
+    runId,
+    'left',
+    context,
+    options,
+    signal,
+    researchDependencies,
+    evidenceArtifactIds,
+  );
+
+  await sleep(120, signal);
+  await setStage(roomId, runId, 'right_research', 'researching', options, signal);
+  const rightGroupPromise = completeGroupInternalWork(
+    room,
+    runId,
+    'right',
+    context,
+    options,
+    signal,
+    researchDependencies,
+    evidenceArtifactIds,
+  );
+
+  const [leftGroup, rightGroup] = await Promise.all([leftGroupPromise, rightGroupPromise]);
+  const leftArtifact = artifactById(leftGroup.lead.artifactId);
+  const rightArtifact = artifactById(rightGroup.lead.artifactId);
+
+  const rounds = Math.max(1, Math.min(5, room.config.debateRounds));
+  let debateDependencies = [leftGroup.lead.taskId, rightGroup.lead.taskId];
+  for (let round = 1; round <= rounds; round++) {
+    await sleep(120, signal);
+    await setStage(roomId, runId, 'debate', 'debating', options, signal, round);
+    const leftDebateTask = addTask(
+      roomId,
+      runId,
+      'left',
+      'Debater',
+      `${room.leftLabel} debate round ${round}`,
+      room.question,
+      options,
+      {
+        nodeId: `left.debate.${round}`,
+        purpose: 'deep',
+        dependencies: debateDependencies,
+        sourceArtifactIds: [leftGroup.lead.artifactId, rightGroup.lead.artifactId].filter(Boolean) as string[],
+      },
+    );
+    const leftDebate = await generateStep({
+      room,
+      runId,
+      context,
+      kind: 'debate',
+      group: 'left',
+      agentRole: 'Debater',
+      round,
+      purpose: 'deep',
+      fallback: fallbackDebate(room, 'left', round),
+      signal,
+      maxTokens: 1800,
+    });
+    addMessage(roomId, runId, 'left', `${room.leftLabel} Debater`, 'Debater', 'debate', withFallbackNote(leftDebate), options, round);
+    finishTask(leftDebateTask.id, [], options);
+
+    await sleep(120, signal);
+    const rightDebateTask = addTask(
+      roomId,
+      runId,
+      'right',
+      'Debater',
+      `${room.rightLabel} debate round ${round}`,
+      room.question,
+      options,
+      {
+        nodeId: `right.debate.${round}`,
+        purpose: 'deep',
+        dependencies: [leftDebateTask.id, ...debateDependencies],
+        sourceArtifactIds: [leftGroup.lead.artifactId, rightGroup.lead.artifactId].filter(Boolean) as string[],
+      },
+    );
+    const rightDebate = await generateStep({
+      room,
+      runId,
+      context,
+      kind: 'debate',
+      group: 'right',
+      agentRole: 'Debater',
+      round,
+      purpose: 'deep',
+      fallback: fallbackDebate(room, 'right', round),
+      signal,
+      maxTokens: 1800,
+    });
+    addMessage(roomId, runId, 'right', `${room.rightLabel} Debater`, 'Debater', 'debate', withFallbackNote(rightDebate), options, round);
+    finishTask(rightDebateTask.id, [], options);
+    debateDependencies = [leftDebateTask.id, rightDebateTask.id];
+    options.broadcast({ type: 'agent_room_debate_round_completed', roomId, runId, round });
+  }
+
+  await sleep(160, signal);
+  await setStage(roomId, runId, 'neutral_review', 'reviewing', options, signal);
+  const neutralReview = await completeNeutralReviewSubTeam(
+    room,
+    runId,
+    context,
+    options,
+    signal,
+    debateDependencies,
+    [leftGroup.lead.artifactId, rightGroup.lead.artifactId, ...evidenceArtifactIds].filter(Boolean) as string[],
+  );
+  const neutralArtifactIds = [
+    neutralReview.fact.artifactId,
+    neutralReview.logic.artifactId,
+    neutralReview.risk.artifactId,
+    neutralReview.product.artifactId,
+  ].filter(Boolean) as string[];
+
+  await sleep(160, signal);
+  await setStage(roomId, runId, 'final_report', 'reviewing', options, signal);
+  const finalReportTask = addTask(
+    roomId,
+    runId,
+    'neutral',
+    'Final Synthesizer',
+    `${room.neutralLabel} final report`,
+    room.question,
+    options,
+    {
+      nodeId: 'neutral.final_synthesizer',
+      purpose: 'deep',
+      dependencies: [
+        neutralReview.fact.taskId,
+        neutralReview.logic.taskId,
+        neutralReview.risk.taskId,
+        neutralReview.product.taskId,
+      ],
+      sourceArtifactIds: [
+        ...neutralArtifactIds,
+        leftGroup.lead.artifactId,
+        rightGroup.lead.artifactId,
+        ...evidenceArtifactIds,
+      ].filter(Boolean) as string[],
+    },
+  );
+  const shouldDegradeFinal = shouldUseReliabilityReport(context);
+  const generatedFinalReport = shouldDegradeFinal
+    ? {
+        text: fallbackReliabilityReport(room, context),
+        source: 'fallback' as const,
+        warning: reliabilityWarning(context),
+      }
+    : await generateStep({
+        room,
+        runId,
+        context,
+        kind: 'final_report',
+        group: 'neutral',
+        agentRole: 'Final Synthesizer',
+        purpose: 'deep',
+        fallback: fallbackFinalReport(room, context),
+        signal,
+        maxTokens: 4200,
+      });
+  const finalReport = withReliabilityNotice(generatedFinalReport, context, shouldDegradeFinal);
+  const final = addArtifact(
+    roomId,
+    runId,
+    'neutral',
+    'neutral-final',
+    'final_report',
+    'Agents Room final report',
+    finalReport.text,
+    confidenceFor(finalReport, shouldDegradeFinal ? 0.4 : 0.84),
+    options,
+    finalReport,
+  );
+  finishTask(finalReportTask.id, [final.id], options);
+  addMessage(roomId, runId, 'neutral', `${room.neutralLabel} Synthesizer`, 'Final Synthesizer', 'final_report', withFallbackNote(finalReport), options);
+  options.broadcast({ type: 'agent_room_final_report_ready', roomId, runId, artifact: final });
+
+  completeRun(
+    roomId,
+    runId,
+    options,
+    context.usage,
+    reliabilityWarning(context),
+    ...[final.id, neutralReview.risk.artifactId, leftArtifact?.id, rightArtifact?.id].filter(Boolean) as string[],
+  );
+}
+
+async function runAgentRoomLegacy(
+  roomId: string,
+  runId: string,
+  options: AgentRoomServiceOptions,
+  signal: AbortSignal,
+): Promise<void> {
+  const room = currentRoom(roomId);
+  if (!room) return;
+  const context: RunContext = { usage: { ...EMPTY_USAGE }, modelFailures: [], modelSuccesses: 0, fallbackSteps: [] };
+
+  await setStage(roomId, runId, 'planning', 'planning', options, signal);
+  const moderatorTask = addTask(
+    roomId,
+    runId,
+    'moderator',
+    'Moderator',
+    'Problem framing and task plan',
+    room.question,
+    options,
+    { nodeId: 'moderator.plan', purpose: 'quick' },
+  );
   const moderator = await generateStep({
     room,
     runId,
@@ -351,16 +699,51 @@ async function runAgentRoom(
     maxTokens: 1800,
   });
   addMessage(roomId, runId, 'moderator', 'Moderator', '主持人', 'planning', withFallbackNote(moderator), options);
-  collectWorkspaceEvidence(room, runId, options);
+  finishTask(moderatorTask.id, [], options);
+  const workspaceEvidence = collectWorkspaceEvidence(room, runId, options, [moderatorTask.id]);
+  const webEvidence = await collectWebEvidence(
+    room,
+    runId,
+    options,
+    [moderatorTask.id, workspaceEvidence?.taskId].filter(Boolean) as string[],
+    signal,
+  );
+  const evidenceArtifactIds = [workspaceEvidence?.artifactId, webEvidence?.artifactId].filter(Boolean) as string[];
+  const researchDependencies = [moderatorTask.id, workspaceEvidence?.taskId, webEvidence?.taskId].filter(Boolean) as string[];
 
   await sleep(160, signal);
   await setStage(roomId, runId, 'left_research', 'researching', options, signal);
-  await completeResearchTask(room, runId, 'left', 'Searcher', '机会视角资料与假设梳理', context, options, signal);
+  const leftResearch = await completeResearchTask(room, runId, 'left', 'Searcher', `${room.leftLabel} research and assumptions`, context, options, signal, {
+    nodeId: 'left.searcher',
+    purpose: 'quick',
+    dependencies: researchDependencies,
+    sourceArtifactIds: evidenceArtifactIds,
+  });
 
   await setStage(roomId, runId, 'right_research', 'researching', options, signal);
-  await completeResearchTask(room, runId, 'right', 'Searcher', '风险视角资料与假设梳理', context, options, signal);
+  const rightResearch = await completeResearchTask(room, runId, 'right', 'Searcher', `${room.rightLabel} research and assumptions`, context, options, signal, {
+    nodeId: 'right.searcher',
+    purpose: 'quick',
+    dependencies: researchDependencies,
+    sourceArtifactIds: evidenceArtifactIds,
+  });
 
   await setStage(roomId, runId, 'left_synthesis', 'researching', options, signal);
+  const leftSynthesisTask = addTask(
+    roomId,
+    runId,
+    'left',
+    'Lead',
+    `${room.leftLabel} synthesis`,
+    room.question,
+    options,
+    {
+      nodeId: 'left.lead',
+      purpose: 'deep',
+      dependencies: [leftResearch.taskId],
+      sourceArtifactIds: [leftResearch.artifactId, ...evidenceArtifactIds].filter(Boolean) as string[],
+    },
+  );
   const leftSynthesis = await generateStep({
     room,
     runId,
@@ -383,10 +766,26 @@ async function runAgentRoom(
     options,
     leftSynthesis,
   );
+  finishTask(leftSynthesisTask.id, [leftArtifact.id], options);
   addMessage(roomId, runId, 'left', `${room.leftLabel} Lead`, '小组负责人', 'left_synthesis', withFallbackNote(leftSynthesis), options);
 
   await sleep(160, signal);
   await setStage(roomId, runId, 'right_synthesis', 'researching', options, signal);
+  const rightSynthesisTask = addTask(
+    roomId,
+    runId,
+    'right',
+    'Lead',
+    `${room.rightLabel} synthesis`,
+    room.question,
+    options,
+    {
+      nodeId: 'right.lead',
+      purpose: 'deep',
+      dependencies: [rightResearch.taskId],
+      sourceArtifactIds: [rightResearch.artifactId, ...evidenceArtifactIds].filter(Boolean) as string[],
+    },
+  );
   const rightSynthesis = await generateStep({
     room,
     runId,
@@ -409,12 +808,24 @@ async function runAgentRoom(
     options,
     rightSynthesis,
   );
+  finishTask(rightSynthesisTask.id, [rightArtifact.id], options);
   addMessage(roomId, runId, 'right', `${room.rightLabel} Lead`, '小组负责人', 'right_synthesis', withFallbackNote(rightSynthesis), options);
 
   const rounds = Math.max(1, Math.min(5, room.config.debateRounds));
+  let debateDependencies = [leftSynthesisTask.id, rightSynthesisTask.id];
   for (let round = 1; round <= rounds; round++) {
     await sleep(120, signal);
     await setStage(roomId, runId, 'debate', 'debating', options, signal, round);
+    const leftDebateTask = addTask(
+      roomId,
+      runId,
+      'left',
+      'Debater',
+      `${room.leftLabel} debate round ${round}`,
+      room.question,
+      options,
+      { nodeId: `left.debate.${round}`, purpose: 'deep', dependencies: debateDependencies },
+    );
     const leftDebate = await generateStep({
       room,
       runId,
@@ -428,8 +839,19 @@ async function runAgentRoom(
       maxTokens: 1800,
     });
     addMessage(roomId, runId, 'left', `${room.leftLabel} Debater`, '辩论 Agent', 'debate', withFallbackNote(leftDebate), options, round);
+    finishTask(leftDebateTask.id, [], options);
 
     await sleep(120, signal);
+    const rightDebateTask = addTask(
+      roomId,
+      runId,
+      'right',
+      'Debater',
+      `${room.rightLabel} debate round ${round}`,
+      room.question,
+      options,
+      { nodeId: `right.debate.${round}`, purpose: 'deep', dependencies: [leftDebateTask.id, ...debateDependencies] },
+    );
     const rightDebate = await generateStep({
       room,
       runId,
@@ -443,11 +865,23 @@ async function runAgentRoom(
       maxTokens: 1800,
     });
     addMessage(roomId, runId, 'right', `${room.rightLabel} Debater`, '辩论 Agent', 'debate', withFallbackNote(rightDebate), options, round);
+    finishTask(rightDebateTask.id, [], options);
+    debateDependencies = [leftDebateTask.id, rightDebateTask.id];
     options.broadcast({ type: 'agent_room_debate_round_completed', roomId, runId, round });
   }
 
   await sleep(160, signal);
   await setStage(roomId, runId, 'neutral_review', 'reviewing', options, signal);
+  const neutralReviewTask = addTask(
+    roomId,
+    runId,
+    'neutral',
+    'Fact Judge',
+    `${room.neutralLabel} evidence and risk review`,
+    room.question,
+    options,
+    { nodeId: 'neutral.fact_judge', purpose: 'deep', dependencies: debateDependencies },
+  );
   const neutralReview = await generateStep({
     room,
     runId,
@@ -470,10 +904,21 @@ async function runAgentRoom(
     options,
     neutralReview,
   );
+  finishTask(neutralReviewTask.id, [riskArtifact.id], options);
   addMessage(roomId, runId, 'neutral', `${room.neutralLabel} Fact Judge`, '综合评审', 'neutral_review', withFallbackNote(neutralReview), options);
 
   await sleep(160, signal);
   await setStage(roomId, runId, 'final_report', 'reviewing', options, signal);
+  const finalReportTask = addTask(
+    roomId,
+    runId,
+    'neutral',
+    'Synthesizer',
+    `${room.neutralLabel} final report`,
+    room.question,
+    options,
+    { nodeId: 'neutral.final_synthesizer', purpose: 'deep', dependencies: [neutralReviewTask.id], sourceArtifactIds: [riskArtifact.id, leftArtifact.id, rightArtifact.id] },
+  );
   const shouldDegradeFinal = shouldUseReliabilityReport(context);
   const generatedFinalReport = shouldDegradeFinal
     ? {
@@ -505,10 +950,154 @@ async function runAgentRoom(
     options,
     finalReport,
   );
+  finishTask(finalReportTask.id, [final.id], options);
   addMessage(roomId, runId, 'neutral', `${room.neutralLabel} Synthesizer`, '最终总结', 'final_report', withFallbackNote(finalReport), options);
   options.broadcast({ type: 'agent_room_final_report_ready', roomId, runId, artifact: final });
 
   completeRun(roomId, runId, options, context.usage, reliabilityWarning(context), final.id, riskArtifact.id, leftArtifact.id, rightArtifact.id);
+}
+
+async function runSupplementalEvidence(
+  room: AgentRoomData,
+  run: AgentRoomRunData,
+  group: 'left' | 'right',
+  instruction: string,
+  options: AgentRoomServiceOptions,
+): Promise<{ task: AgentRoomTaskData; artifact: AgentRoomArtifactData; message: AgentRoomMessageData }> {
+  const context: RunContext = { usage: { ...EMPTY_USAGE }, modelFailures: [], modelSuccesses: 0, fallbackSteps: [] };
+  const signal = new AbortController().signal;
+  const label = groupLabel(room, group);
+  const prompt = [
+    `${label} supplemental evidence request`,
+    '',
+    `Question: ${room.question}`,
+    instruction ? `User instruction: ${instruction}` : 'User instruction: add the most useful missing evidence for this group.',
+  ].join('\n');
+  const sourceArtifactIds = artifactsForRun(room.id, run.id)
+    .filter((artifact) => artifact.group === group || artifact.group === 'neutral')
+    .slice(0, 12)
+    .map((artifact) => artifact.id);
+  const task = addTask(
+    room.id,
+    run.id,
+    group,
+    'Evidence Scout',
+    `${label} supplemental evidence`,
+    prompt,
+    options,
+    {
+      nodeId: `${group}.intervention.evidence.${Date.now()}`,
+      purpose: 'quick',
+      dependencies: latestCompletedTaskIds(room.id, run.id).slice(-4),
+      sourceArtifactIds,
+    },
+  );
+  const generated = await generateStep({
+    room,
+    runId: run.id,
+    context,
+    kind: 'research',
+    group,
+    agentRole: 'Evidence Scout',
+    purpose: 'quick',
+    fallback: fallbackResearch(room, group),
+    signal,
+    maxTokens: 1800,
+  });
+  const artifact = addArtifact(
+    room.id,
+    run.id,
+    group,
+    `${group}-evidence-scout`,
+    'evidence',
+    `${label} supplemental evidence`,
+    generated.text,
+    confidenceFor(generated, 0.73),
+    options,
+    generated,
+  );
+  const message = addMessage(
+    room.id,
+    run.id,
+    group,
+    `${label} Evidence Scout`,
+    'Evidence Scout',
+    group === 'left' ? 'left_research' : 'right_research',
+    withFallbackNote(generated),
+    options,
+  );
+  finishTask(task.id, [artifact.id], options);
+  touchAgentRoom(room.id, options);
+  return { task: taskById(task.id) ?? task, artifact, message };
+}
+
+async function rerunFinalSynthesis(
+  room: AgentRoomData,
+  run: AgentRoomRunData,
+  instruction: string,
+  options: AgentRoomServiceOptions,
+): Promise<{ task: AgentRoomTaskData; artifact: AgentRoomArtifactData; message: AgentRoomMessageData }> {
+  const context: RunContext = { usage: { ...EMPTY_USAGE }, modelFailures: [], modelSuccesses: 0, fallbackSteps: [] };
+  const signal = new AbortController().signal;
+  const sourceArtifactIds = artifactsForRun(room.id, run.id)
+    .filter((artifact) => artifact.type !== 'final_report')
+    .slice(0, 24)
+    .map((artifact) => artifact.id);
+  const task = addTask(
+    room.id,
+    run.id,
+    'neutral',
+    'Final Synthesizer',
+    `${room.neutralLabel} final report refresh`,
+    instruction ? `${room.question}\n\nUser instruction: ${instruction}` : room.question,
+    options,
+    {
+      nodeId: `neutral.final_synthesizer.refresh.${Date.now()}`,
+      purpose: 'deep',
+      dependencies: latestCompletedTaskIds(room.id, run.id).slice(-8),
+      sourceArtifactIds,
+      retryCount: 1,
+    },
+  );
+  const generated = await generateStep({
+    room,
+    runId: run.id,
+    context,
+    kind: 'final_report',
+    group: 'neutral',
+    agentRole: 'Final Synthesizer',
+    purpose: 'deep',
+    fallback: fallbackFinalReport(room, context),
+    signal,
+    maxTokens: 4200,
+  });
+  const finalReport = withReliabilityNotice(generated, context, shouldUseReliabilityReport(context));
+  const artifact = addArtifact(
+    room.id,
+    run.id,
+    'neutral',
+    'neutral-final-refresh',
+    'final_report',
+    'Agents Room final report refresh',
+    finalReport.text,
+    confidenceFor(finalReport, 0.84),
+    options,
+    finalReport,
+  );
+  const message = addMessage(
+    room.id,
+    run.id,
+    'neutral',
+    `${room.neutralLabel} Synthesizer`,
+    'Final Synthesizer',
+    'final_report',
+    withFallbackNote(finalReport),
+    options,
+  );
+  finishTask(task.id, [artifact.id], options);
+  options.broadcast({ type: 'agent_room_final_report_ready', roomId: room.id, runId: run.id, artifact });
+  touchAgentRoom(room.id, options);
+  return { task: taskById(task.id) ?? task, artifact, message };
 }
 
 async function completeResearchTask(
@@ -520,9 +1109,13 @@ async function completeResearchTask(
   context: RunContext,
   options: AgentRoomServiceOptions,
   signal: AbortSignal,
-): Promise<void> {
-  const prompt = `${title}\n\n问题：${room.question}`;
-  const task = addTask(room.id, runId, group, agentRole, title, prompt, options);
+  taskOptions: TaskGraphOptions = {},
+): Promise<TaskCompletion> {
+  const prompt = `${title}\n\nQuestion: ${room.question}`;
+  const task = addTask(room.id, runId, group, agentRole, title, prompt, options, {
+    purpose: 'quick',
+    ...taskOptions,
+  });
   await sleep(120, signal);
   const generated = await generateStep({
     room,
@@ -560,17 +1153,308 @@ async function completeResearchTask(
   );
   finishTask(task.id, [artifact.id], options);
   await sleep(120, signal);
+  return { taskId: task.id, artifactId: artifact.id };
+}
+
+async function completeGroupInternalWork(
+  room: AgentRoomData,
+  runId: string,
+  group: 'left' | 'right',
+  context: RunContext,
+  options: AgentRoomServiceOptions,
+  signal: AbortSignal,
+  dependencies: string[],
+  sourceArtifactIds: string[],
+): Promise<GroupWorkResult> {
+  const label = groupLabel(room, group);
+  const stage: AgentRoomStageData = group === 'left' ? 'left_research' : 'right_research';
+  const leadStage: AgentRoomStageData = group === 'left' ? 'left_synthesis' : 'right_synthesis';
+  const leadType: AgentRoomArtifactData['type'] = group === 'left' ? 'claim' : 'counterclaim';
+
+  const [searcher, reader] = await Promise.all([
+    completeAgentArtifactTask({
+      room,
+      runId,
+      group,
+      agentRole: 'Searcher',
+      title: `${label} search and evidence candidates`,
+      kind: 'research',
+      stage,
+      artifactType: 'evidence',
+      context,
+      options,
+      signal,
+      purpose: 'quick',
+      dependencies,
+      sourceArtifactIds,
+      fallback: fallbackResearch(room, group),
+      confidence: 0.72,
+      maxTokens: 1600,
+    }),
+    completeAgentArtifactTask({
+      room,
+      runId,
+      group,
+      agentRole: 'Reader',
+      title: `${label} source reading and summary`,
+      kind: 'research',
+      stage,
+      artifactType: 'evidence',
+      context,
+      options,
+      signal,
+      purpose: 'quick',
+      dependencies,
+      sourceArtifactIds,
+      fallback: fallbackResearch(room, group),
+      confidence: 0.72,
+      maxTokens: 1600,
+    }),
+  ]);
+
+  const organizer = await completeAgentArtifactTask({
+    room,
+    runId,
+    group,
+    agentRole: 'Organizer',
+    title: `${label} evidence organization`,
+    kind: 'research',
+    stage,
+    artifactType: 'evidence',
+    context,
+    options,
+    signal,
+    purpose: 'quick',
+    dependencies: [searcher.taskId, reader.taskId],
+    sourceArtifactIds: [searcher.artifactId, reader.artifactId, ...sourceArtifactIds].filter(Boolean) as string[],
+    fallback: fallbackResearch(room, group),
+    confidence: 0.73,
+    maxTokens: 1800,
+  });
+
+  const [argument, counterargument] = await Promise.all([
+    completeAgentArtifactTask({
+      room,
+      runId,
+      group,
+      agentRole: 'Argument Builder',
+      title: `${label} strongest argument`,
+      kind: 'synthesis',
+      stage: leadStage,
+      artifactType: leadType,
+      context,
+      options,
+      signal,
+      purpose: 'deep',
+      dependencies: [organizer.taskId],
+      sourceArtifactIds: [organizer.artifactId].filter(Boolean) as string[],
+      fallback: fallbackSynthesis(room, group),
+      confidence: 0.76,
+      maxTokens: 1800,
+    }),
+    completeAgentArtifactTask({
+      room,
+      runId,
+      group,
+      agentRole: 'Counterargument Builder',
+      title: `${label} anticipated rebuttals`,
+      kind: 'synthesis',
+      stage: leadStage,
+      artifactType: 'counterclaim',
+      context,
+      options,
+      signal,
+      purpose: 'deep',
+      dependencies: [organizer.taskId],
+      sourceArtifactIds: [organizer.artifactId].filter(Boolean) as string[],
+      fallback: fallbackSynthesis(room, group),
+      confidence: 0.74,
+      maxTokens: 1800,
+    }),
+  ]);
+
+  const lead = await completeAgentArtifactTask({
+    room,
+    runId,
+    group,
+    agentRole: 'Lead',
+    title: `${label} final group position`,
+    kind: 'synthesis',
+    stage: leadStage,
+    artifactType: leadType,
+    context,
+    options,
+    signal,
+    purpose: 'deep',
+    dependencies: [argument.taskId, counterargument.taskId],
+    sourceArtifactIds: [argument.artifactId, counterargument.artifactId, organizer.artifactId].filter(Boolean) as string[],
+    fallback: fallbackSynthesis(room, group),
+    confidence: 0.78,
+    maxTokens: 2200,
+  });
+
+  return { searcher, reader, organizer, argument, counterargument, lead };
+}
+
+async function completeNeutralReviewSubTeam(
+  room: AgentRoomData,
+  runId: string,
+  context: RunContext,
+  options: AgentRoomServiceOptions,
+  signal: AbortSignal,
+  dependencies: string[],
+  sourceArtifactIds: string[],
+): Promise<NeutralReviewResult> {
+  const common = {
+    room,
+    runId,
+    group: 'neutral' as const,
+    kind: 'neutral_review' as const,
+    stage: 'neutral_review' as const,
+    context,
+    options,
+    signal,
+    purpose: 'deep' as const,
+    dependencies,
+    sourceArtifactIds,
+    fallback: fallbackNeutralReview(room),
+    maxTokens: 1800,
+  };
+
+  const [fact, logic, risk, product] = await Promise.all([
+    completeAgentArtifactTask({
+      ...common,
+      agentRole: 'Fact Judge',
+      title: `${room.neutralLabel} fact and evidence review`,
+      artifactType: 'summary',
+      confidence: 0.82,
+      nodeId: 'neutral.fact_judge',
+    }),
+    completeAgentArtifactTask({
+      ...common,
+      agentRole: 'Logic Judge',
+      title: `${room.neutralLabel} logic review`,
+      artifactType: 'summary',
+      confidence: 0.81,
+      nodeId: 'neutral.logic_judge',
+    }),
+    completeAgentArtifactTask({
+      ...common,
+      agentRole: 'Risk Judge',
+      title: `${room.neutralLabel} risk review`,
+      artifactType: 'risk',
+      confidence: 0.82,
+      nodeId: 'neutral.risk_judge',
+    }),
+    completeAgentArtifactTask({
+      ...common,
+      agentRole: 'Product Judge',
+      title: `${room.neutralLabel} product impact review`,
+      artifactType: 'summary',
+      confidence: 0.8,
+      nodeId: 'neutral.product_judge',
+    }),
+  ]);
+
+  return { fact, logic, risk, product };
+}
+
+async function completeAgentArtifactTask(input: {
+  room: AgentRoomData;
+  runId: string;
+  group: 'left' | 'right' | 'neutral';
+  agentRole: string;
+  title: string;
+  kind: AgentRoomPromptKind;
+  stage: AgentRoomStageData;
+  artifactType: AgentRoomArtifactData['type'];
+  context: RunContext;
+  options: AgentRoomServiceOptions;
+  signal: AbortSignal;
+  purpose: 'quick' | 'deep';
+  dependencies: string[];
+  sourceArtifactIds: string[];
+  fallback: string;
+  confidence: number;
+  nodeId?: string;
+  maxTokens?: number;
+}): Promise<TaskCompletion> {
+  const task = addTask(
+    input.room.id,
+    input.runId,
+    input.group,
+    input.agentRole,
+    input.title,
+    `${input.title}\n\nQuestion: ${input.room.question}`,
+    input.options,
+    {
+      nodeId: input.nodeId ?? `${input.group}.${input.agentRole.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+      purpose: input.purpose,
+      dependencies: input.dependencies,
+      sourceArtifactIds: input.sourceArtifactIds,
+    },
+  );
+  await sleep(input.purpose === 'quick' ? 80 : 120, input.signal);
+
+  const generated = await generateStep({
+    room: input.room,
+    runId: input.runId,
+    context: input.context,
+    kind: input.kind,
+    group: input.group === 'neutral' ? 'neutral' : input.group,
+    agentRole: input.agentRole,
+    purpose: input.purpose,
+    fallback: input.fallback,
+    signal: input.signal,
+    maxTokens: input.maxTokens,
+  });
+  const artifact = addArtifact(
+    input.room.id,
+    input.runId,
+    input.group,
+    `${input.group}-${input.agentRole.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+    input.artifactType,
+    input.title,
+    generated.text,
+    confidenceFor(generated, input.confidence),
+    input.options,
+    generated,
+  );
+  addMessage(
+    input.room.id,
+    input.runId,
+    input.group,
+    `${groupLabel(input.room, input.group)} ${input.agentRole}`,
+    input.agentRole,
+    input.stage,
+    withFallbackNote(generated),
+    input.options,
+  );
+  finishTask(task.id, [artifact.id], input.options);
+  return { taskId: task.id, artifactId: artifact.id };
 }
 
 function collectWorkspaceEvidence(
   room: AgentRoomData,
   runId: string,
   options: AgentRoomServiceOptions,
-): AgentRoomArtifactData | null {
+  dependencies: string[] = [],
+): TaskCompletion | null {
   if (!room.config.useWorkspaceSearch || !room.sessionId) return null;
 
   const snippets = collectWorkspaceSnippets(room);
   if (snippets.length === 0) return null;
+
+  const task = addTask(
+    room.id,
+    runId,
+    'neutral',
+    'Workspace Reader',
+    'Collect workspace evidence from current project',
+    room.question,
+    options,
+    { nodeId: 'neutral.workspace_reader', purpose: 'quick', dependencies },
+  );
 
   const content = [
     '以下内容来自当前工作区的自动摘录，用作 Agent Room 的背景资料。它们只代表本地文件内容片段，不等于最终事实判断。',
@@ -596,6 +1480,12 @@ function collectWorkspaceEvidence(
       source: 'workspace',
       title: `Workspace snippets (${snippets.length})`,
       path: room.projectPath,
+      citations: snippets.map((snippet) => ({
+        id: createId('cite'),
+        title: snippet.path,
+        source: snippet.path,
+        kind: 'workspace',
+      })),
     },
   );
   addMessage(
@@ -608,7 +1498,121 @@ function collectWorkspaceEvidence(
     `已从当前工作区加入 ${snippets.length} 个文件片段作为证据背景。`,
     options,
   );
-  return artifact;
+  finishTask(task.id, [artifact.id], options);
+  return { taskId: task.id, artifactId: artifact.id };
+}
+
+async function collectWebEvidence(
+  room: AgentRoomData,
+  runId: string,
+  options: AgentRoomServiceOptions,
+  dependencies: string[],
+  signal: AbortSignal,
+): Promise<TaskCompletion | null> {
+  if (!room.config.useWebSearch) return null;
+
+  const task = addTask(
+    room.id,
+    runId,
+    'neutral',
+    'Web Searcher',
+    'Collect external web evidence',
+    room.question,
+    options,
+    { nodeId: 'neutral.web_searcher', purpose: 'quick', dependencies },
+  );
+
+  try {
+    const query = buildWebEvidenceQuery(room);
+    const results = await searchWeb({ query, maxResults: 6, signal });
+    if (results.length === 0) throw new Error('No web search results were returned.');
+
+    const artifact = addArtifact(
+      room.id,
+      runId,
+      'neutral',
+      'web-searcher',
+      'evidence',
+      'Web search evidence',
+      formatWebSearchResultsAsMarkdown(query, results),
+      0.68,
+      options,
+      {
+        source: 'web',
+        title: `Web search (${results.length})`,
+        provider: Array.from(new Set(results.map((result) => result.provider))).join(', '),
+        results,
+        citations: results.map((result) => ({
+          id: createId('cite'),
+          title: result.title,
+          source: result.url,
+          kind: 'web',
+        })),
+      },
+    );
+    addMessage(
+      room.id,
+      runId,
+      'neutral',
+      'Web Searcher',
+      'Web evidence collector',
+      'planning',
+      `Added ${results.length} external web result(s) as untrusted evidence.`,
+      options,
+    );
+    finishTask(task.id, [artifact.id], options);
+    return { taskId: task.id, artifactId: artifact.id };
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw err;
+    const status = await getWebSearchStatus();
+    const reason = conciseError(err);
+    const content = [
+      '# Web Search Unavailable',
+      '',
+      'Web search was enabled for this room, but Pi Agent could not retrieve external evidence.',
+      '',
+      `Reason: ${reason}`,
+      `Status: ${status.message}`,
+      '',
+      'Configure one of these environment variables, or configure Zhipu/OpenAI model credentials and restart the desktop server:',
+      '',
+      '- `TAVILY_API_KEY` or `PI_AGENT_TAVILY_API_KEY`',
+      '- `BRAVE_SEARCH_API_KEY` or `PI_AGENT_BRAVE_SEARCH_API_KEY`',
+      '- `EXA_API_KEY` or `PI_AGENT_EXA_API_KEY`',
+      '',
+      'Provider-native fallback is also supported through configured Zhipu/OpenAI model credentials.',
+      '',
+      'Optional: set `PI_AGENT_WEB_SEARCH_PROVIDER=tavily|brave|exa|zai|openai|auto`.',
+    ].join('\n');
+    const artifact = addArtifact(
+      room.id,
+      runId,
+      'neutral',
+      'web-searcher',
+      'evidence',
+      'Web search unavailable',
+      content,
+      0.12,
+      options,
+      {
+        source: 'fallback',
+        text: content,
+        warning: reason,
+      },
+    );
+    addMessage(
+      room.id,
+      runId,
+      'neutral',
+      'Web Searcher',
+      'Web evidence collector',
+      'planning',
+      `Web search was enabled but unavailable: ${reason}`,
+      options,
+    );
+    finishTask(task.id, [artifact.id], options);
+    return { taskId: task.id, artifactId: artifact.id };
+  }
 }
 
 function collectWorkspaceSnippets(room: AgentRoomData): Array<{ path: string; content: string; truncated: boolean }> {
@@ -815,23 +1819,30 @@ function setStage(
 function addTask(
   roomId: string,
   runId: string,
-  group: 'left' | 'right' | 'neutral',
+  group: AgentRoomTaskGroup,
   agentRole: string,
   title: string,
   prompt: string,
   options: AgentRoomServiceOptions,
+  taskOptions: TaskGraphOptions = {},
 ): AgentRoomTaskData {
+  const dependencies = taskOptions.dependencies ?? [];
   const task: AgentRoomTaskData = {
     id: createId('task'),
     roomId,
     runId,
+    nodeId: taskOptions.nodeId ?? nodeIdFor(group, agentRole, title),
     group,
     agentRole,
     title,
     prompt,
+    purpose: taskOptions.purpose,
     status: 'running',
-    dependencies: [],
+    dependencies,
+    dependsOn: dependencies,
+    sourceArtifactIds: taskOptions.sourceArtifactIds ?? [],
     outputArtifactIds: [],
+    retryCount: taskOptions.retryCount ?? 0,
     startedAt: Date.now(),
   };
   const store = readStore();
@@ -850,6 +1861,15 @@ function finishTask(taskId: string, outputArtifactIds: string[], options: AgentR
   task.completedAt = Date.now();
   writeStore(store);
   options.broadcast({ type: 'agent_room_task_completed', task });
+}
+
+function nodeIdFor(group: AgentRoomTaskGroup, agentRole: string, title: string): string {
+  const slug = `${agentRole}-${title}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return `${group}.${slug || 'task'}`;
 }
 
 function addMessage(
@@ -958,6 +1978,71 @@ function failRun(roomId: string, runId: string, message: string, options: AgentR
 
 function currentRoom(roomId: string): AgentRoomData | undefined {
   return readStore().rooms.find((item) => item.id === roomId);
+}
+
+function latestRunForRoom(store: AgentRoomStoreData, roomId: string): AgentRoomRunData | undefined {
+  return [...store.runs]
+    .filter((run) => run.roomId === roomId)
+    .sort((a, b) => b.startedAt - a.startedAt)[0];
+}
+
+function artifactById(artifactId: string | undefined): AgentRoomArtifactData | undefined {
+  if (!artifactId) return undefined;
+  return readStore().artifacts.find((artifact) => artifact.id === artifactId);
+}
+
+function taskById(taskId: string | undefined): AgentRoomTaskData | undefined {
+  if (!taskId) return undefined;
+  return readStore().tasks.find((task) => task.id === taskId);
+}
+
+function artifactsForRun(roomId: string, runId: string): AgentRoomArtifactData[] {
+  return readStore().artifacts
+    .filter((artifact) => artifact.roomId === roomId && artifact.runId === runId)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function latestCompletedTaskIds(roomId: string, runId: string): string[] {
+  return readStore().tasks
+    .filter((task) => task.roomId === roomId && task.runId === runId && task.status === 'completed')
+    .sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0))
+    .map((task) => task.id);
+}
+
+function touchAgentRoom(roomId: string, options: AgentRoomServiceOptions): void {
+  const store = readStore();
+  const room = store.rooms.find((item) => item.id === roomId);
+  if (!room) return;
+  room.updatedAt = Date.now();
+  writeStore(store);
+  options.broadcast({ type: 'agent_room_updated', room });
+}
+
+function interventionResult(
+  roomId: string,
+  runId: string,
+  messages: AgentRoomMessageData[],
+  artifacts: AgentRoomArtifactData[],
+  tasks: AgentRoomTaskData[],
+): AgentRoomInterventionResultData | null {
+  const store = readStore();
+  const room = store.rooms.find((item) => item.id === roomId);
+  const run = store.runs.find((item) => item.id === runId);
+  if (!room || !run) return null;
+  return {
+    room,
+    run,
+    messages,
+    artifacts,
+    tasks,
+    snapshot: getSnapshot(),
+  };
+}
+
+function groupLabel(room: AgentRoomData, group: 'left' | 'right' | 'neutral'): string {
+  if (group === 'left') return room.leftLabel;
+  if (group === 'right') return room.rightLabel;
+  return room.neutralLabel;
 }
 
 function readStore(): AgentRoomStoreData {
@@ -1071,7 +2156,7 @@ function inferRoomTitle(question: string): string {
 
 function transcriptForRun(roomId: string, runId: string): string {
   const lines = readStore().messages
-    .filter((message) => message.roomId === roomId && message.runId === runId)
+    .filter((message) => message.roomId === roomId && (message.runId === runId || message.agentId === 'user-note'))
     .map((message) => `[${message.stage}] ${message.agentName}: ${messageText(message)}`);
   return limitText(lines.join('\n\n'), 14_000);
 }
@@ -1120,12 +2205,22 @@ function sourceCitation(source?: ArtifactSourceInfo): AgentRoomCitationData[] {
     }];
   }
   if (source?.source === 'workspace') {
+    if (source.citations?.length) return source.citations;
     return [{
       id: createId('cite'),
       title: source.title,
       source: source.path ?? 'workspace',
       kind: 'workspace',
     }];
+  }
+  if (source?.source === 'web') {
+    if (source.citations?.length) return source.citations;
+    return source.results.map((result) => ({
+      id: createId('cite'),
+      title: result.title,
+      source: result.url,
+      kind: 'web',
+    }));
   }
   return [{
     id: createId('cite'),
@@ -1407,6 +2502,15 @@ function buildWorkspaceEvidenceQueries(question: string): string[] {
     .slice(0, 8);
   const fixed = ['readme', 'docs', 'agent', 'desktop', 'server', 'frontend'];
   return Array.from(new Set([...latinTerms, ...fixed])).slice(0, 10);
+}
+
+function buildWebEvidenceQuery(room: AgentRoomData): string {
+  const labels = [room.leftLabel, room.rightLabel, room.neutralLabel]
+    .map((label) => normalizeString(label))
+    .filter(Boolean)
+    .join(' ');
+  const query = [room.question, labels].filter(Boolean).join(' ');
+  return limitText(query.replace(/\s+/g, ' ').trim(), 360);
 }
 
 const COMMON_QUERY_WORDS = new Set([

@@ -19,6 +19,7 @@ import type {
   PromptOptimizeFileReference,
   PromptOptimizeImageReference,
   PromptOptimizeMode,
+  PromptOptimizeResult,
   PromptOptimizeSessionContext,
   PromptOptimizeWorkspaceContext,
   Session,
@@ -30,6 +31,7 @@ import type {
 import { piApi } from '../../api/client';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
 import { createNewSessionFromPicker, openProjectsLauncher } from '../../lib/sessionActions';
+import { thinkingLevelPillClass, thinkingLevelTextClass } from '../../lib/thinkingLevelStyles';
 import { hasWorkspaceFileDragPayload, readWorkspaceFileDragPayload, type WorkspaceFileDragPayload } from '../../lib/workspaceDrag';
 import { useUIStore } from '../../stores/uiStore';
 import { useChatStore } from '../../stores/chatStore';
@@ -45,29 +47,45 @@ import {
   Check,
   ChevronDown,
   Command,
+  Copy,
   FileText,
   Gauge,
   Image as ImageIcon,
   Loader2,
   Network,
   Paperclip,
+  Pencil,
   Search,
   Send,
   Shield,
   Sparkles,
   Square,
+  Trash2,
   Undo2,
   X,
 } from 'lucide-react';
 
 interface ChatInputProps {
-  onSend: (text: string, images?: ImageAttachment[], displayText?: string) => boolean | void;
+  onSend: (
+    text: string,
+    images?: ImageAttachment[],
+    displayText?: string,
+    mode?: ChatInputSendMode,
+    draft?: QueuedFollowUpDraft
+  ) => boolean | void;
   onStop: () => void;
   isStreaming: boolean;
   sessionId: string;
+  queuedFollowUps?: QueuedFollowUpItem[];
+  onEditQueuedFollowUp?: (id: string) => void;
+  onDeleteQueuedFollowUp?: (id: string) => void;
+  onGuideQueuedFollowUp?: (id: string) => void;
 }
 
-interface WorkspaceFileReference {
+type ChatInputSendMode = 'prompt' | 'steer' | 'follow_up';
+type StreamingSendMode = Extract<ChatInputSendMode, 'steer' | 'follow_up'>;
+
+export interface WorkspaceFileReference {
   id: string;
   path: string;
   name: string;
@@ -75,6 +93,21 @@ interface WorkspaceFileReference {
   lineEnd?: number;
   excerpt?: string;
   sourceKind?: 'file' | 'diff';
+}
+
+export interface QueuedFollowUpDraft {
+  text: string;
+  attachments: ImageAttachment[];
+  fileReferences: WorkspaceFileReference[];
+}
+
+export interface QueuedFollowUpItem {
+  id: string;
+  text: string;
+  displayText: string;
+  images?: ImageAttachment[];
+  draft?: QueuedFollowUpDraft;
+  createdAt: number;
 }
 
 interface ComposerDraft {
@@ -88,6 +121,19 @@ interface PromptOptimizationSnapshot {
   optimizedText: string;
   selectionStart: number;
   selectionEnd: number;
+}
+
+interface PromptOptimizationPreview {
+  id: string;
+  originalText: string;
+  optimizedText: string;
+  replacementText: string;
+  selectionStart: number;
+  selectionEnd: number;
+  nextSelectionStart: number;
+  nextSelectionEnd: number;
+  selectionOnly: boolean;
+  result: PromptOptimizeResult;
 }
 
 type WorkspaceReferenceEventDetail = {
@@ -164,7 +210,16 @@ const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'hi
 const PERMISSION_MODE_OPTIONS: PermissionMode[] = ['ask', 'acceptEdits', 'plan', 'bypassPermissions'];
 const PROMPT_OPTIMIZE_MODES: PromptOptimizeMode[] = ['auto', 'polish', 'execute', 'debug', 'review', 'research', 'ui', 'agent_room'];
 
-export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  onStop,
+  isStreaming,
+  sessionId,
+  queuedFollowUps = [],
+  onEditQueuedFollowUp,
+  onDeleteQueuedFollowUp,
+  onGuideQueuedFollowUp,
+}: ChatInputProps) {
   const { t } = useI18n();
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
@@ -182,8 +237,10 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
   const [lastPromptOptimization, setLastPromptOptimization] = useState<PromptOptimizationSnapshot | null>(null);
+  const [promptOptimizationPreview, setPromptOptimizationPreview] = useState<PromptOptimizationPreview | null>(null);
   const [promptOptimizeMode, setPromptOptimizeMode] = useState<PromptOptimizeMode>('auto');
   const [showPromptOptimizeMenu, setShowPromptOptimizeMenu] = useState(false);
+  const [streamingSendMode, setStreamingSendMode] = useState<StreamingSendMode>('follow_up');
   const [openControlMenu, setOpenControlMenu] = useState<'model' | 'permission' | 'thinking' | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -202,16 +259,19 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const runtimeSlashCommands = useUIStore((s) => s.slashCommands);
   const messages = useChatStore((s) => s.messagesBySession[sessionId] ?? EMPTY_MESSAGES);
   const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === sessionId));
+  const queueState = useChatStore((s) => s.queueBySession[sessionId]);
   const globalCurrentModel = useModelStore((s) => s.currentModel);
   const availableModels = useModelStore((s) => s.availableModels);
   const globalThinkingLevel = useModelStore((s) => s.thinkingLevel);
   const permissionMode = useSettingsStore((s) => s.permissionMode);
+  const promptOptimizerModel = useSettingsStore((s) => s.promptOptimizerModel);
   const updateSetting = useSettingsStore((s) => s.updateSetting);
   const currentModel = useMemo(
     () => modelForSession(activeSession, availableModels, globalCurrentModel),
     [activeSession, availableModels, globalCurrentModel]
   );
   const thinkingLevel = activeSession?.thinkingLevel ?? globalThinkingLevel;
+  const queueCounts = queueState ?? { steering: 0, followUp: 0 };
 
   const fallbackSlashCommands = useMemo(() => localizeFallbackSlashCommands(t), [t]);
   const slashCommands = useMemo(
@@ -274,6 +334,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       setAttachments(draft?.attachments ?? []);
       setFileReferences(draft?.fileReferences ?? []);
       setLastPromptOptimization(null);
+      setPromptOptimizationPreview(null);
       currentSessionRef.current = sessionId;
     }
 
@@ -434,7 +495,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             setFileSearchLoading(false);
           }
         });
-    }, 120);
+    }, 180);
 
     return () => window.clearTimeout(timer);
   }, [fileSearchFilter, sessionId, showFileSearch, t]);
@@ -487,6 +548,9 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     if (lastPromptOptimization && value !== lastPromptOptimization.optimizedText) {
       setLastPromptOptimization(null);
     }
+    if (promptOptimizationPreview && value !== promptOptimizationPreview.originalText) {
+      setPromptOptimizationPreview(null);
+    }
     if (!detectSlashTrigger(value, cursorPos)) {
       detectAtTrigger(value, cursorPos);
     }
@@ -506,6 +570,11 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
 
     const references = fileReferences;
     const images = attachments.length > 0 ? attachments : undefined;
+    const draft: QueuedFollowUpDraft = {
+      text,
+      attachments,
+      fileReferences,
+    };
 
     setIsPreparingPrompt(true);
     try {
@@ -514,7 +583,8 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         : trimmed;
       const displayText = buildDisplayText(trimmed, references);
 
-      const sent = onSend(modelText, images, displayText);
+      const sendMode: ChatInputSendMode = isStreaming ? streamingSendMode : 'prompt';
+      const sent = onSend(modelText, images, displayText, sendMode, draft);
       if (sent === false) return;
 
       clearComposer();
@@ -537,7 +607,35 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     setAttachments([]);
     setFileReferences([]);
     setLastPromptOptimization(null);
+    setPromptOptimizationPreview(null);
     draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+  };
+
+  const editQueuedFollowUp = (item: QueuedFollowUpItem) => {
+    onEditQueuedFollowUp?.(item.id);
+    const draft = item.draft;
+    const restoredText = draft?.text ?? item.displayText ?? item.text;
+    const restoredAttachments = draft?.attachments ?? item.images ?? [];
+    const restoredReferences = draft?.fileReferences ?? [];
+
+    setText(restoredText);
+    setAttachments(restoredAttachments);
+    setFileReferences(restoredReferences);
+    setLastPromptOptimization(null);
+    setPromptOptimizationPreview(null);
+    closeFileSearch();
+    setShowSlashMenu(false);
+    draftsRef.current[sessionId] = {
+      text: restoredText,
+      attachments: restoredAttachments,
+      fileReferences: restoredReferences,
+    };
+
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      const cursor = restoredText.length;
+      textareaRef.current?.setSelectionRange(cursor, cursor);
+    });
   };
 
   const runWorkbenchSlashCommand = async (value: string): Promise<boolean> => {
@@ -882,6 +980,43 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     addToast({ type: 'info', message: t('chat.optimizePromptUndone') });
   };
 
+  const acceptPromptOptimizationPreview = () => {
+    const preview = promptOptimizationPreview;
+    if (!preview) return;
+
+    setLastPromptOptimization({
+      originalText: preview.originalText,
+      optimizedText: preview.replacementText,
+      selectionStart: preview.selectionStart,
+      selectionEnd: preview.selectionEnd,
+    });
+    setText(preview.replacementText);
+    setPromptOptimizationPreview(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(preview.nextSelectionStart, preview.nextSelectionEnd);
+    });
+    addToast({
+      type: 'success',
+      message: preview.selectionOnly ? t('chat.optimizePromptSelectionDone') : t('chat.optimizePromptDone'),
+    });
+  };
+
+  const copyPromptOptimizationPreview = async () => {
+    const preview = promptOptimizationPreview;
+    if (!preview) return;
+    try {
+      await navigator.clipboard.writeText(preview.optimizedText);
+      addToast({ type: 'success', message: t('chat.optimizePromptCopied') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('chat.optimizePromptCopyFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
   const optimizeComposerPrompt = async () => {
     if (isOptimizingPrompt) return;
 
@@ -921,6 +1056,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         selectionOnly: hasSelection,
         sessionId,
         currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+        preferredOptimizerModel: promptOptimizerModel ?? undefined,
       });
       const optimized = result.optimized.trim();
       if (!optimized) throw new Error(result.warning || t('chat.optimizePromptEmptyResult'));
@@ -936,26 +1072,28 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         nextSelectionEnd = before.length + optimized.length;
       }
 
-      setLastPromptOptimization({
+      setLastPromptOptimization(null);
+      setPromptOptimizationPreview({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         originalText: text,
-        optimizedText: nextText,
+        optimizedText: optimized,
+        replacementText: nextText,
         selectionStart,
         selectionEnd,
-      });
-      setText(nextText);
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-        textareaRef.current?.setSelectionRange(nextSelectionStart, nextSelectionEnd);
+        nextSelectionStart,
+        nextSelectionEnd,
+        selectionOnly: hasSelection,
+        result,
       });
 
       closeFileSearch();
       setShowSlashMenu(false);
-      const promptOptimizedMessage = result.source === 'model'
-        ? t('chat.optimizePromptModelDone')
-        : t('chat.optimizePromptLocalDone');
       addToast({
-        type: 'success',
-        message: promptOptimizedMessage || (hasSelection ? t('chat.optimizePromptSelectionDone') : t('chat.optimizePromptDone')),
+        type: result.changedIntentRisk === 'high' ? 'warning' : 'success',
+        message: t('chat.optimizePromptPreviewReady', {
+          source: promptOptimizeSourceLabel(result, t),
+          score: result.qualityScore ?? '-',
+        }),
         duration: result.warning ? 6000 : undefined,
       });
     } catch (err) {
@@ -987,6 +1125,8 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         rightLabel: t('agentsRoom.defaultRight'),
         neutralLabel: t('agentsRoom.defaultNeutral'),
         debateRounds: 2,
+        quickModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+        deepModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
         useWorkspaceSearch: true,
         useWebSearch: false,
       });
@@ -1103,6 +1243,102 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         </div>
       )}
 
+      {promptOptimizationPreview && (
+        <div className="px-3 pb-2">
+          <div className="rounded-xl border border-pi-accent/20 bg-pi-bg-elevated/95 p-3 shadow-lg">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-pi-accent/12 text-pi-accent">
+                <Sparkles size={14} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-pi-text">{t('chat.optimizePromptPreviewTitle')}</div>
+                <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px] text-pi-dim">
+                  <span className="rounded-full border border-pi-border/70 px-2 py-0.5">
+                    {promptOptimizeModeLabel(promptOptimizationPreview.result.mode ?? promptOptimizeMode, t)}
+                  </span>
+                  <span className="rounded-full border border-pi-border/70 px-2 py-0.5">
+                    {promptOptimizeSourceLabel(promptOptimizationPreview.result, t)}
+                  </span>
+                  {typeof promptOptimizationPreview.result.qualityScore === 'number' && (
+                    <span className="rounded-full border border-pi-border/70 px-2 py-0.5">
+                      {t('chat.optimizePromptScore', { score: promptOptimizationPreview.result.qualityScore })}
+                    </span>
+                  )}
+                  {promptOptimizationPreview.result.changedIntentRisk && (
+                    <span className={cn(
+                      'rounded-full border px-2 py-0.5',
+                      promptOptimizationRiskClass(promptOptimizationPreview.result.changedIntentRisk)
+                    )}>
+                      {promptOptimizationRiskLabel(promptOptimizationPreview.result.changedIntentRisk, t)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={() => setPromptOptimizationPreview(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+                title={t('common.close')}
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <div className="min-w-0 rounded-lg border border-pi-border/60 bg-pi-bg/70 p-2">
+                <div className="mb-1 text-[10px] font-medium uppercase text-pi-dim">{t('chat.optimizePromptBefore')}</div>
+                <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-pi-muted">{promptOptimizationPreview.selectionOnly
+                    ? promptOptimizationPreview.originalText.slice(promptOptimizationPreview.selectionStart, promptOptimizationPreview.selectionEnd)
+                    : promptOptimizationPreview.originalText}</pre>
+              </div>
+              <div className="min-w-0 rounded-lg border border-pi-accent/20 bg-pi-accent/5 p-2">
+                <div className="mb-1 text-[10px] font-medium uppercase text-pi-accent">{t('chat.optimizePromptAfter')}</div>
+                <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-pi-text">{promptOptimizationPreview.optimizedText}</pre>
+              </div>
+            </div>
+
+            {(promptOptimizationPreview.result.warning || promptOptimizationPreview.result.warnings?.length) && (
+              <div className="mt-2 rounded-lg border border-pi-warning/25 bg-pi-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-pi-warning">
+                {(promptOptimizationPreview.result.warnings ?? [promptOptimizationPreview.result.warning]).filter(Boolean).slice(0, 3).join(' · ')}
+              </div>
+            )}
+
+            <div className="mt-3 flex flex-wrap justify-end gap-2">
+              <button
+                onClick={() => void copyPromptOptimizationPreview()}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-pi-border/70 px-3 text-xs text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+              >
+                <Copy size={13} />
+                {t('common.copy')}
+              </button>
+              <button
+                onClick={() => void optimizeComposerPrompt()}
+                disabled={isOptimizingPrompt}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-pi-border/70 px-3 text-xs text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isOptimizingPrompt ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                {t('chat.optimizePromptRegenerate')}
+              </button>
+              <button
+                onClick={acceptPromptOptimizationPreview}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-pi-accent px-3 text-xs font-medium text-white transition-colors hover:bg-pi-accent/90"
+              >
+                <Check size={13} />
+                {t('chat.optimizePromptAccept')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {queuedFollowUps.length > 0 && (
+        <QueuedFollowUpCards
+          items={queuedFollowUps}
+          onEdit={editQueuedFollowUp}
+          onDelete={(id) => onDeleteQueuedFollowUp?.(id)}
+          onGuide={(id) => onGuideQueuedFollowUp?.(id)}
+        />
+      )}
+
       <ComposerControlBar
         refEl={controlBarRef}
         openMenu={openControlMenu}
@@ -1148,7 +1384,8 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
           <AtSign size={16} />
         </button>
 
-        <div ref={promptOptimizeMenuRef} className="relative flex flex-shrink-0">
+        {false && (
+        <div className="hidden" aria-hidden="true">
           <button
             onClick={optimizeComposerPrompt}
             disabled={!text.trim() || isOptimizingPrompt || isPreparingPrompt}
@@ -1208,6 +1445,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             </div>
           )}
         </div>
+        )}
 
         {lastPromptOptimization && text === lastPromptOptimization.optimizedText && (
           <button
@@ -1228,7 +1466,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
           <Network size={16} />
         </button>
 
-        <div className="flex-1 relative">
+        <div className="flex-1 relative min-w-0">
           {showFileSearch && (
             <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-[90] mb-2 overflow-hidden rounded-lg">
               <div className="flex h-8 items-center gap-2 border-b border-pi-border/70 px-3 text-xs text-pi-dim">
@@ -1266,22 +1504,116 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             </div>
           )}
 
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={handleTextChange}
-            onKeyDown={handleKeyDown}
-            onCompositionStart={() => { composingRef.current = true; }}
-            onCompositionEnd={() => { composingRef.current = false; }}
-            onPaste={handlePaste}
-            placeholder={isStreaming ? t('chat.queuePlaceholder') : t('chat.messagePlaceholder')}
-            rows={1}
-            className="pi-glass-control w-full resize-none rounded-lg px-3 py-2
-                       text-sm text-pi-text placeholder-pi-dim
-                       focus:outline-none focus:border-pi-accent transition-colors
-                       min-h-[40px] max-h-[200px] leading-6"
-            style={{ fontFamily: 'inherit' }}
-          />
+          <div
+            className={cn(
+              'pi-glass-control pi-composer-input-control flex min-h-[40px] w-full items-center overflow-visible rounded-xl transition-colors',
+              showPromptOptimizeMenu && 'border-pi-accent/45'
+            )}
+          >
+            <div ref={promptOptimizeMenuRef} className="relative ml-1 flex h-9 flex-shrink-0 items-center rounded-xl border border-pi-border/55 bg-pi-bg/45 p-0.5 shadow-[inset_0_1px_color-mix(in_srgb,white_8%,transparent)]">
+              <button
+                onClick={optimizeComposerPrompt}
+                disabled={!text.trim() || isOptimizingPrompt || isPreparingPrompt}
+                className={cn(
+                  'flex h-8 w-8 items-center justify-center rounded-[10px] transition-all duration-150',
+                  text.trim() && !isOptimizingPrompt && !isPreparingPrompt
+                    ? 'bg-pi-accent/10 text-pi-accent shadow-[inset_0_1px_color-mix(in_srgb,white_10%,transparent)] hover:bg-pi-accent/16 active:scale-95'
+                    : 'cursor-not-allowed text-pi-dim opacity-60'
+                )}
+                title={`${t('chat.optimizePrompt')} · ${promptOptimizeModeLabel(promptOptimizeMode, t)}`}
+              >
+                {isOptimizingPrompt ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={15} />}
+              </button>
+              <button
+                onClick={() => setShowPromptOptimizeMenu((open) => !open)}
+                disabled={isOptimizingPrompt || isPreparingPrompt}
+                className={cn(
+                  'flex h-8 w-6 items-center justify-center rounded-[10px] transition-all duration-150',
+                  promptOptimizeMode !== 'auto' || showPromptOptimizeMenu
+                    ? 'bg-pi-accent/10 text-pi-accent shadow-[inset_0_1px_color-mix(in_srgb,white_10%,transparent)] hover:bg-pi-accent/16 active:scale-95'
+                    : 'text-pi-dim hover:bg-pi-bg-hover/80 hover:text-pi-text active:scale-95',
+                  (isOptimizingPrompt || isPreparingPrompt) && 'cursor-not-allowed opacity-60'
+                )}
+                title={t('chat.optimizePromptModeMenu')}
+              >
+                <ChevronDown size={12} />
+              </button>
+
+              {showPromptOptimizeMenu && (
+                <div className="pi-glass-menu absolute bottom-full left-0 z-[95] mb-2 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-lg">
+                  <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">
+                    {t('chat.optimizePromptModeMenu')}
+                  </div>
+                  <div className="max-h-[340px] overflow-y-auto py-1">
+                    {PROMPT_OPTIMIZE_MODES.map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={() => {
+                          setPromptOptimizeMode(mode);
+                          setShowPromptOptimizeMenu(false);
+                        }}
+                        className={cn(
+                          'flex w-full items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-pi-bg-hover',
+                          promptOptimizeMode === mode ? 'bg-pi-selected-bg text-pi-text' : 'text-pi-muted'
+                        )}
+                      >
+                        <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-pi-border/70 text-pi-accent">
+                          {promptOptimizeMode === mode ? <Check size={10} /> : null}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-pi-text">{promptOptimizeModeLabel(mode, t)}</span>
+                          <span className="block text-[10px] leading-relaxed text-pi-dim">{promptOptimizeModeDescription(mode, t)}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <textarea
+              ref={textareaRef}
+              value={text}
+              onChange={handleTextChange}
+              onKeyDown={handleKeyDown}
+              onCompositionStart={() => { composingRef.current = true; }}
+              onCompositionEnd={() => { composingRef.current = false; }}
+              onPaste={handlePaste}
+              placeholder={isStreaming
+                ? t(streamingSendMode === 'steer' ? 'chat.steerPlaceholder' : 'chat.queuePlaceholder')
+                : t('chat.messagePlaceholder')}
+              rows={1}
+              className="pi-embedded-input min-h-[40px] max-h-[200px] flex-1 resize-none bg-transparent px-3 py-2 text-sm leading-6 text-pi-text placeholder-pi-dim transition-colors focus:outline-none"
+              style={{ fontFamily: 'inherit' }}
+            />
+
+            {isStreaming && (
+              <StreamingQueueModeControl
+                mode={streamingSendMode}
+                steeringCount={queueCounts.steering}
+                followUpCount={queueCounts.followUp + queuedFollowUps.length}
+                onChange={setStreamingSendMode}
+              />
+            )}
+
+            {(!isStreaming || canSubmit) && (
+              <button
+                onClick={() => void handleSend()}
+                disabled={!canSubmit || isPreparingPrompt}
+                className={cn(
+                  'mr-1 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border transition-all duration-150 shadow-[inset_0_1px_color-mix(in_srgb,white_16%,transparent),0_2px_8px_color-mix(in_srgb,black_18%,transparent)]',
+                  canSubmit && !isPreparingPrompt
+                    ? 'border-pi-accent/35 bg-pi-accent/88 text-white hover:bg-pi-accent active:scale-95'
+                    : 'cursor-not-allowed border-pi-border/55 bg-pi-bg-tertiary/70 text-pi-dim shadow-[inset_0_1px_color-mix(in_srgb,white_8%,transparent)]'
+                )}
+                title={isStreaming
+                  ? t(streamingSendMode === 'steer' ? 'chat.steerCurrent' : 'chat.queueFollowUp')
+                  : t('chat.sendMessage')}
+              >
+                {isPreparingPrompt ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+              </button>
+            )}
+          </div>
         </div>
 
         {isStreaming && (
@@ -1293,25 +1625,162 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             <Square size={14} fill="currentColor" />
           </button>
         )}
-
-        {(!isStreaming || canSubmit) && (
-          <button
-            onClick={() => void handleSend()}
-            disabled={!canSubmit || isPreparingPrompt}
-            className={cn(
-              'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl transition-colors',
-              canSubmit && !isPreparingPrompt
-                ? 'bg-pi-accent text-white hover:bg-pi-accent/90'
-                : 'cursor-not-allowed bg-pi-bg-tertiary/70 text-pi-dim'
-            )}
-            title={isStreaming ? t('chat.queueFollowUp') : t('chat.sendMessage')}
-          >
-            {isPreparingPrompt ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-          </button>
-        )}
       </div>
     </div>
   );
+}
+
+function StreamingQueueModeControl({
+  mode,
+  steeringCount,
+  followUpCount,
+  onChange,
+}: {
+  mode: StreamingSendMode;
+  steeringCount: number;
+  followUpCount: number;
+  onChange: (mode: StreamingSendMode) => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div
+      className="mr-1 flex flex-shrink-0 items-center rounded-lg border border-pi-border/60 bg-pi-bg/40 p-0.5 shadow-inner"
+      title={t('chat.queueModeHint')}
+    >
+      <button
+        type="button"
+        onClick={() => onChange('steer')}
+        className={cn(
+          'flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-medium transition-colors',
+          mode === 'steer'
+            ? 'bg-pi-accent/14 text-pi-accent shadow-sm'
+            : 'text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text'
+        )}
+        title={t('chat.steerCurrentHint')}
+      >
+        <Command size={12} />
+        <span>{t('chat.queueModeSteer')}</span>
+        {steeringCount > 0 && (
+          <span className="ml-0.5 rounded-full bg-pi-accent/15 px-1.5 text-[10px] text-pi-accent">
+            {steeringCount}
+          </span>
+        )}
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('follow_up')}
+        className={cn(
+          'flex h-7 items-center gap-1 rounded-md px-2 text-[11px] font-medium transition-colors',
+          mode === 'follow_up'
+            ? 'bg-pi-accent/14 text-pi-accent shadow-sm'
+            : 'text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text'
+        )}
+        title={t('chat.queueFollowUpHint')}
+      >
+        <Send size={12} />
+        <span>{t('chat.queueModeFollowUp')}</span>
+        {followUpCount > 0 && (
+          <span className="ml-0.5 rounded-full bg-pi-accent/15 px-1.5 text-[10px] text-pi-accent">
+            {followUpCount}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function QueuedFollowUpCards({
+  items,
+  onEdit,
+  onDelete,
+  onGuide,
+}: {
+  items: QueuedFollowUpItem[];
+  onEdit: (item: QueuedFollowUpItem) => void;
+  onDelete: (id: string) => void;
+  onGuide: (id: string) => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className="px-3 pb-2">
+      <div className="max-h-44 space-y-1.5 overflow-y-auto pr-1">
+        {items.map((item, index) => {
+          const preview = queuedFollowUpPreview(item);
+          const referenceCount = item.draft?.fileReferences.length ?? 0;
+          const imageCount = item.draft?.attachments.length ?? item.images?.length ?? 0;
+
+          return (
+            <div
+              key={item.id}
+              className="group flex items-start gap-2 rounded-xl border border-pi-accent/20 bg-pi-accent/10 px-2.5 py-2 shadow-sm backdrop-blur-xl"
+            >
+              <div className="mt-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-pi-accent/14 text-[10px] font-semibold text-pi-accent">
+                {index + 1}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[11px] font-semibold text-pi-accent">{t('chat.queuedFollowUpLabel')}</span>
+                  <span className="text-[10px] text-pi-dim">{t('chat.queuedFollowUpStatus')}</span>
+                  {referenceCount > 0 && (
+                    <span className="rounded-full border border-pi-border/60 px-1.5 py-0.5 text-[10px] text-pi-dim">
+                      {t('chat.queuedFollowUpReferences', { count: referenceCount })}
+                    </span>
+                  )}
+                  {imageCount > 0 && (
+                    <span className="rounded-full border border-pi-border/60 px-1.5 py-0.5 text-[10px] text-pi-dim">
+                      {t('chat.queuedFollowUpImages', { count: imageCount })}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 max-h-10 overflow-hidden whitespace-pre-wrap break-words text-xs leading-5 text-pi-text">
+                  {preview || item.displayText}
+                </div>
+              </div>
+              <div className="flex flex-shrink-0 items-center gap-1 opacity-90 transition-opacity group-hover:opacity-100">
+                <button
+                  type="button"
+                  onClick={() => onEdit(item)}
+                  className="flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+                  title={t('chat.queuedFollowUpEdit')}
+                >
+                  <Pencil size={12} />
+                  <span className="hidden sm:inline">{t('chat.queuedFollowUpEdit')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onGuide(item.id)}
+                  className="flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] text-pi-dim transition-colors hover:bg-pi-accent/12 hover:text-pi-accent"
+                  title={t('chat.queuedFollowUpGuide')}
+                >
+                  <Command size={12} />
+                  <span className="hidden sm:inline">{t('chat.queuedFollowUpGuide')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDelete(item.id)}
+                  className="flex h-7 items-center justify-center rounded-lg px-2 text-pi-dim transition-colors hover:bg-pi-error/12 hover:text-pi-error"
+                  title={t('chat.queuedFollowUpDelete')}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function queuedFollowUpPreview(item: QueuedFollowUpItem): string {
+  if (item.draft?.text.trim()) return item.draft.text.trim();
+  return item.displayText
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('@'))
+    .join('\n')
+    .trim() || item.displayText.trim() || item.text.trim();
 }
 
 interface ComposerContextUsage {
@@ -1398,6 +1867,7 @@ function ComposerControlBar({
         label={thinkingLevelLabel(thinkingLevel, t)}
         active={openMenu === 'thinking'}
         compact={compact}
+        className={thinkingLevelPillClass(thinkingLevel, openMenu === 'thinking')}
         title={t('chat.thinkingLevel')}
         onClick={() => onToggleMenu('thinking')}
       />
@@ -1482,10 +1952,10 @@ function ComposerControlBar({
                 key={level}
                 onClick={() => onSelectThinking(level)}
                 className={cn(
-                  'h-8 rounded-md px-2 text-xs capitalize transition-colors',
+                  'h-8 rounded-md border px-2 text-xs capitalize transition-colors',
                   thinkingLevel === level
-                    ? 'bg-pi-selected-bg text-pi-accent'
-                    : 'text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
+                    ? thinkingLevelPillClass(level, true)
+                    : cn('border-transparent bg-transparent hover:bg-pi-bg-hover', thinkingLevelTextClass(level))
                 )}
               >
                 {thinkingLevelLabel(level, t)}
@@ -1504,6 +1974,7 @@ function ComposerControlButton({
   active,
   tone,
   compact,
+  className,
   title,
   onClick,
 }: {
@@ -1512,6 +1983,7 @@ function ComposerControlButton({
   active?: boolean;
   tone?: 'warning';
   compact?: boolean;
+  className?: string;
   title: string;
   onClick: () => void;
 }) {
@@ -1526,7 +1998,8 @@ function ComposerControlButton({
           ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
           : tone === 'warning'
             ? 'border-pi-warning/40 bg-pi-warning/10 text-pi-warning hover:bg-pi-warning/15'
-            : 'border-pi-border/70 bg-pi-bg-secondary/70 text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text'
+            : 'border-pi-border/70 bg-pi-bg-secondary/70 text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text',
+        className
       )}
       title={title}
     >
@@ -1838,6 +2311,33 @@ function promptOptimizeModeDescription(
   t: (key: TranslationKey, values?: Record<string, string | number>) => string
 ): string {
   return t(`chat.optimizePromptMode.${mode}.description` as TranslationKey);
+}
+
+function promptOptimizeSourceLabel(
+  result: PromptOptimizeResult,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  if (result.source === 'skill') {
+    return t('chat.optimizePromptSourceSkill', { skill: result.skillName ?? 'skill' });
+  }
+  if (result.source === 'model') {
+    const model = [result.provider, result.modelId].filter(Boolean).join('/');
+    return model ? t('chat.optimizePromptSourceModelNamed', { model }) : t('chat.optimizePromptSourceModel');
+  }
+  return t('chat.optimizePromptSourceLocal');
+}
+
+function promptOptimizationRiskLabel(
+  risk: NonNullable<PromptOptimizeResult['changedIntentRisk']>,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  return t(`chat.optimizePromptRisk.${risk}` as TranslationKey);
+}
+
+function promptOptimizationRiskClass(risk: NonNullable<PromptOptimizeResult['changedIntentRisk']>): string {
+  if (risk === 'high') return 'border-pi-error/35 bg-pi-error/10 text-pi-error';
+  if (risk === 'medium') return 'border-pi-warning/35 bg-pi-warning/10 text-pi-warning';
+  return 'border-pi-success/30 bg-pi-success/10 text-pi-success';
 }
 
 function buildPromptFileReferences(references: WorkspaceFileReference[]): PromptOptimizeFileReference[] | undefined {

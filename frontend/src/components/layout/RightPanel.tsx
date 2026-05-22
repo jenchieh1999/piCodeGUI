@@ -2475,6 +2475,13 @@ function FilesTree({
           setContextMenu({ x: event.clientX, y: event.clientY, entry });
         }}
       />
+      {root.truncated && (
+        <WorkspaceTreeLimitNotice
+          shown={root.entries.length}
+          total={root.totalEntries ?? root.entries.length}
+          depth={0}
+        />
+      )}
       {contextMenu && typeof document !== 'undefined' && createPortal(
         <WorkspaceFileContextMenu
           state={contextMenu}
@@ -2680,27 +2687,36 @@ function TreeEntries({
               {loading && <RefreshCw size={10} className="animate-spin text-pi-dim ml-auto" />}
             </button>
             {entry.isDirectory && expanded && childTree?.state === 'ok' && (
-              <TreeEntries
-                sessionId={sessionId}
-                entries={childTree.entries}
-                treeByPath={treeByPath}
-                loadingByPath={loadingByPath}
-                expandedPaths={expandedPaths}
-                query={query}
-                revealedPath={revealedPath}
-                scrollTargetPath={scrollTargetPath}
-                selectedPath={selectedPath}
-                depth={depth + 1}
-                onToggle={onToggle}
-                onOpen={onOpen}
-                onSelect={onSelect}
-                onScrollTargetSettled={onScrollTargetSettled}
-                onMove={onMove}
-                onAddToChat={onAddToChat}
-                onOpenStandalone={onOpenStandalone}
-                onDetachStandalone={onDetachStandalone}
-                onContextMenu={onContextMenu}
-              />
+              <>
+                <TreeEntries
+                  sessionId={sessionId}
+                  entries={childTree.entries}
+                  treeByPath={treeByPath}
+                  loadingByPath={loadingByPath}
+                  expandedPaths={expandedPaths}
+                  query={query}
+                  revealedPath={revealedPath}
+                  scrollTargetPath={scrollTargetPath}
+                  selectedPath={selectedPath}
+                  depth={depth + 1}
+                  onToggle={onToggle}
+                  onOpen={onOpen}
+                  onSelect={onSelect}
+                  onScrollTargetSettled={onScrollTargetSettled}
+                  onMove={onMove}
+                  onAddToChat={onAddToChat}
+                  onOpenStandalone={onOpenStandalone}
+                  onDetachStandalone={onDetachStandalone}
+                  onContextMenu={onContextMenu}
+                />
+                {childTree.truncated && (
+                  <WorkspaceTreeLimitNotice
+                    shown={childTree.entries.length}
+                    total={childTree.totalEntries ?? childTree.entries.length}
+                    depth={depth + 1}
+                  />
+                )}
+              </>
             )}
             {entry.isDirectory && expanded && childTree?.state === 'error' && (
               <div className="px-3 py-1 text-[10px] text-pi-error" style={{ paddingLeft: 24 + depth * 14 }}>
@@ -2711,6 +2727,18 @@ function TreeEntries({
         );
       })}
     </>
+  );
+}
+
+function WorkspaceTreeLimitNotice({ shown, total, depth }: { shown: number; total: number; depth: number }) {
+  const { t } = useI18n();
+  return (
+    <div
+      className="mx-2 my-1 rounded-md border border-pi-border/70 bg-pi-bg-secondary/70 px-2 py-1 text-[10px] leading-relaxed text-pi-dim"
+      style={{ marginLeft: 8 + depth * 14 }}
+    >
+      {t('rightPanel.fileTreeLimited', { shown, total })}
+    </div>
   );
 }
 

@@ -1,7 +1,7 @@
 import { useChatStore } from '../../stores/chatStore';
 import { useUIStore } from '../../stores/uiStore';
 import { MessageList } from './MessageList';
-import { ChatInput } from './ChatInput';
+import { ChatInput, type QueuedFollowUpItem, type QueuedFollowUpDraft } from './ChatInput';
 import { WelcomeScreen } from './WelcomeScreen';
 import { piApi } from '../../api/client';
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
@@ -14,14 +14,21 @@ import { useI18n } from '../../lib/i18n';
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const TERMINAL_DOCK_MIN_HEIGHT = 140;
 const TERMINAL_DOCK_MAX_HEIGHT = 520;
+type ChatInputSendMode = 'prompt' | 'steer' | 'follow_up';
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+function nextQueuedFollowUpId() {
+  return `queued-follow-up-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
 export function ChatView() {
   const { t } = useI18n();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const messages = useChatStore((s) => (activeSessionId ? s.messagesBySession[activeSessionId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const streamingSessionId = useChatStore((s) => s.streamingSessionId);
+  const activeSessionStatus = useChatStore((s) => (activeSessionId ? s.sessionStatuses[activeSessionId] : undefined));
   const activeSession = useChatStore((s) => s.sessions.find((ss) => ss.id === activeSessionId));
   const addUserMessage = useChatStore((s) => s.addUserMessage);
   const addToast = useUIStore((s) => s.addToast);
@@ -31,7 +38,15 @@ export function ChatView() {
   const chatBackgroundImage = useSettingsStore((s) => s.chatBackgroundImage);
   const chatBackgroundDim = useSettingsStore((s) => s.chatBackgroundDim);
   const [isResizingTerminalDock, setIsResizingTerminalDock] = useState(false);
+  const [queuedFollowUpsBySession, setQueuedFollowUpsBySession] = useState<Record<string, QueuedFollowUpItem[]>>({});
   const resizeStateRef = useRef({ startY: 0, startHeight: terminalDockHeight });
+  const autoSendingQueuedRef = useRef(false);
+
+  const queuedFollowUps = activeSessionId ? queuedFollowUpsBySession[activeSessionId] ?? [] : [];
+  const isActiveSessionBusy = Boolean(
+    activeSessionId &&
+    ((isStreaming && streamingSessionId === activeSessionId) || activeSessionStatus === 'running')
+  );
 
   // Reset streaming state when session changes
   useEffect(() => {
@@ -40,22 +55,20 @@ export function ChatView() {
     }
   }, [activeSessionId]);
 
-  const handleSend = (text: string, images?: ImageAttachment[], displayText?: string): boolean => {
-    if (!activeSessionId) return false;
+  const sendToRuntime = useCallback((
+    sessionId: string,
+    text: string,
+    images?: ImageAttachment[],
+    displayText?: string,
+    mode: ChatInputSendMode = 'prompt'
+  ): boolean => {
     const visibleText = displayText ?? text;
-    const sent = piApi.send(isStreaming
-      ? {
-          type: 'follow_up',
-          sessionId: activeSessionId,
-          message: text,
-          images,
-        }
-      : {
-          type: 'prompt',
-          sessionId: activeSessionId,
-          message: text,
-          images,
-        });
+    const sent = piApi.send({
+      type: mode === 'follow_up' ? 'prompt' : mode,
+      sessionId,
+      message: text,
+      images,
+    });
     if (!sent) {
       addToast({
         type: 'error',
@@ -64,9 +77,108 @@ export function ChatView() {
       });
       return false;
     }
-    addUserMessage(activeSessionId, visibleText, images);
+    addUserMessage(sessionId, visibleText, images);
     return true;
+  }, [addToast, addUserMessage]);
+
+  const handleSend = (
+    text: string,
+    images?: ImageAttachment[],
+    displayText?: string,
+    mode?: ChatInputSendMode,
+    draft?: QueuedFollowUpDraft
+  ): boolean => {
+    if (!activeSessionId) return false;
+    const visibleText = displayText ?? text;
+    const messageType: ChatInputSendMode = mode ?? (isActiveSessionBusy ? 'follow_up' : 'prompt');
+
+    if (isActiveSessionBusy && messageType === 'follow_up') {
+      const item: QueuedFollowUpItem = {
+        id: nextQueuedFollowUpId(),
+        text,
+        displayText: visibleText,
+        images,
+        draft,
+        createdAt: Date.now(),
+      };
+      setQueuedFollowUpsBySession((current) => ({
+        ...current,
+        [activeSessionId]: [...(current[activeSessionId] ?? []), item],
+      }));
+      return true;
+    }
+
+    return sendToRuntime(activeSessionId, text, images, displayText, messageType);
   };
+
+  const sendNextQueuedFollowUp = useCallback((sessionId: string): boolean => {
+    if (autoSendingQueuedRef.current) return false;
+    const next = queuedFollowUpsBySession[sessionId]?.[0];
+    if (!next) return false;
+
+    autoSendingQueuedRef.current = true;
+    setQueuedFollowUpsBySession((current) => {
+      const items = current[sessionId] ?? [];
+      return { ...current, [sessionId]: items.slice(1) };
+    });
+
+    window.setTimeout(() => {
+      const state = useChatStore.getState();
+      const stillBusy = (state.isStreaming && state.streamingSessionId === sessionId) ||
+        state.sessionStatuses[sessionId] === 'running';
+      if (stillBusy) {
+        setQueuedFollowUpsBySession((current) => ({
+          ...current,
+          [sessionId]: [next, ...(current[sessionId] ?? [])],
+        }));
+        autoSendingQueuedRef.current = false;
+        return;
+      }
+
+      const sent = sendToRuntime(sessionId, next.text, next.images, next.displayText, 'prompt');
+      if (!sent) {
+        setQueuedFollowUpsBySession((current) => ({
+          ...current,
+          [sessionId]: [next, ...(current[sessionId] ?? [])],
+        }));
+      }
+      autoSendingQueuedRef.current = false;
+    }, 80);
+    return true;
+  }, [queuedFollowUpsBySession, sendToRuntime]);
+
+  useEffect(() => {
+    if (!activeSessionId || isActiveSessionBusy) return;
+    sendNextQueuedFollowUp(activeSessionId);
+  }, [activeSessionId, isActiveSessionBusy, queuedFollowUpsBySession, sendNextQueuedFollowUp]);
+
+  const handleEditQueuedFollowUp = useCallback((id: string) => {
+    if (!activeSessionId) return;
+    setQueuedFollowUpsBySession((current) => ({
+      ...current,
+      [activeSessionId]: (current[activeSessionId] ?? []).filter((item) => item.id !== id),
+    }));
+  }, [activeSessionId]);
+
+  const handleDeleteQueuedFollowUp = useCallback((id: string) => {
+    if (!activeSessionId) return;
+    setQueuedFollowUpsBySession((current) => ({
+      ...current,
+      [activeSessionId]: (current[activeSessionId] ?? []).filter((item) => item.id !== id),
+    }));
+  }, [activeSessionId]);
+
+  const handleGuideQueuedFollowUp = useCallback((id: string) => {
+    if (!activeSessionId) return;
+    const item = queuedFollowUpsBySession[activeSessionId]?.find((queued) => queued.id === id);
+    if (!item) return;
+
+    setQueuedFollowUpsBySession((current) => ({
+      ...current,
+      [activeSessionId]: (current[activeSessionId] ?? []).filter((queued) => queued.id !== id),
+    }));
+    sendToRuntime(activeSessionId, item.text, item.images, item.displayText, isActiveSessionBusy ? 'steer' : 'prompt');
+  }, [activeSessionId, isActiveSessionBusy, queuedFollowUpsBySession, sendToRuntime]);
 
   const handleStop = () => {
     if (!activeSessionId) return;
@@ -149,8 +261,12 @@ export function ChatView() {
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
-        isStreaming={isStreaming}
+        isStreaming={isActiveSessionBusy}
         sessionId={activeSessionId!}
+        queuedFollowUps={queuedFollowUps}
+        onEditQueuedFollowUp={handleEditQueuedFollowUp}
+        onDeleteQueuedFollowUp={handleDeleteQueuedFollowUp}
+        onGuideQueuedFollowUp={handleGuideQueuedFollowUp}
       />
 
       {terminalDockOpen && (

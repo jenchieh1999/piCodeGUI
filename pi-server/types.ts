@@ -417,13 +417,18 @@ export interface AgentRoomTaskData {
   id: string;
   roomId: string;
   runId: string;
-  group: Exclude<AgentRoomGroupData, 'system' | 'moderator'>;
+  nodeId?: string;
+  group: Exclude<AgentRoomGroupData, 'system'>;
   agentRole: string;
   title: string;
   prompt: string;
+  purpose?: 'quick' | 'deep';
   status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
   dependencies: string[];
+  dependsOn?: string[];
+  sourceArtifactIds?: string[];
   outputArtifactIds: string[];
+  retryCount?: number;
   error?: string;
   startedAt?: number;
   completedAt?: number;
@@ -453,6 +458,24 @@ export interface AgentRoomCreateInputData {
   useWebSearch?: boolean;
   useWorkspaceSearch?: boolean;
   persistMemory?: boolean;
+}
+
+export type AgentRoomInterventionActionData = 'add_note' | 'add_evidence' | 'rerun_final';
+
+export interface AgentRoomInterventionInputData {
+  action: AgentRoomInterventionActionData;
+  group?: 'left' | 'right';
+  note?: string;
+  instruction?: string;
+}
+
+export interface AgentRoomInterventionResultData {
+  room: AgentRoomData;
+  run: AgentRoomRunData;
+  messages: AgentRoomMessageData[];
+  artifacts: AgentRoomArtifactData[];
+  tasks: AgentRoomTaskData[];
+  snapshot: AgentRoomSnapshotData;
 }
 
 export interface FileChangeData {
@@ -693,14 +716,19 @@ export interface PromptOptimizeInputData {
     provider: string;
     id: string;
   };
+  preferredOptimizerModel?: {
+    provider: string;
+    id: string;
+  };
 }
 
 export interface PromptOptimizeResultData {
   optimized: string;
-  source: 'model' | 'local';
+  source: 'model' | 'local' | 'skill';
   durationMs: number;
   provider?: string;
   modelId?: string;
+  skillName?: string;
   warning?: string;
   mode?: PromptOptimizeModeData;
   qualityScore?: number;

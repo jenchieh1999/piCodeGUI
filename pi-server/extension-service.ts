@@ -1536,13 +1536,8 @@ function buildMarketplace(packages: PackageData[]): MarketplacePackageData[] {
   return MARKETPLACE_TEMPLATES.map((item) => {
     const resolved = resolveMarketplaceTemplateSource(item.relativePath);
     const source = resolved.source;
-    const installed = packages.some((pkg) =>
-      pkg.source === source ||
-      resolved.candidates.some((candidate) => pkg.source === candidate) ||
-      path.resolve(repoRoot, pkg.source) === source ||
-      resolved.candidates.some((candidate) => path.resolve(repoRoot, pkg.source) === candidate) ||
-      (pkg.installedPath ? resolved.candidates.some((candidate) => path.resolve(pkg.installedPath!) === candidate) : false)
-    );
+    const marketplaceIdentities = marketplaceSourceIdentities(item, resolved);
+    const installed = packages.some((pkg) => packageMatchesMarketplace(pkg, resolved, repoRoot, marketplaceIdentities));
     return {
       id: item.id,
       name: item.name,
@@ -1556,6 +1551,100 @@ function buildMarketplace(packages: PackageData[]): MarketplacePackageData[] {
       unavailableReason: resolved.unavailableReason,
     };
   });
+}
+
+function packageMatchesMarketplace(
+  pkg: PackageData,
+  resolved: { source: string; candidates: string[] },
+  repoRoot: string,
+  marketplaceIdentities: Set<string>,
+): boolean {
+  const packageSources = [pkg.source, pkg.installedPath].filter(isDefined);
+  const marketplaceSources = [resolved.source, ...resolved.candidates];
+
+  for (const packageSource of packageSources) {
+    for (const marketplaceSource of marketplaceSources) {
+      if (sourcePathEquals(packageSource, marketplaceSource, repoRoot)) return true;
+    }
+  }
+
+  for (const identity of packageSourceIdentities(pkg)) {
+    if (marketplaceIdentities.has(identity)) return true;
+  }
+
+  return false;
+}
+
+function sourcePathEquals(left: string, right: string, repoRoot: string): boolean {
+  const leftPaths = sourcePathCandidates(left, repoRoot);
+  const rightPaths = sourcePathCandidates(right, repoRoot);
+  return leftPaths.some((leftPath) => rightPaths.some((rightPath) => pathIdentity(leftPath) === pathIdentity(rightPath)));
+}
+
+function sourcePathCandidates(source: string, repoRoot: string): string[] {
+  const trimmed = source.trim();
+  if (!trimmed || isExternalPackageSource(trimmed)) return [];
+  return [path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(repoRoot, trimmed)];
+}
+
+function marketplaceSourceIdentities(
+  item: typeof MARKETPLACE_TEMPLATES[number],
+  resolved: { source: string; candidates: string[] },
+): Set<string> {
+  return new Set([
+    ...resolved.candidates.flatMap(sourceIdentityCandidates),
+    ...sourceIdentityCandidates(resolved.source),
+    stableIdentity(`marketplace:${item.id}`),
+    stableIdentity(`name:${displayNameFromSource(resolved.source)}`),
+  ]);
+}
+
+function packageSourceIdentities(pkg: PackageData): Set<string> {
+  return new Set([
+    ...sourceIdentityCandidates(pkg.source),
+    ...(pkg.installedPath ? sourceIdentityCandidates(pkg.installedPath) : []),
+    stableIdentity(`name:${pkg.name}`),
+  ]);
+}
+
+function sourceIdentityCandidates(source: string): string[] {
+  const identities = new Set<string>();
+  const manifest = readPackageManifest(source);
+  if (manifest?.name) identities.add(stableIdentity(`manifest:${manifest.name}`));
+
+  const normalized = stablePath(source);
+  if (normalized) {
+    identities.add(stableIdentity(`path:${normalized}`));
+    const nodeModulesTail = tailAfterSegment(normalized, 'node_modules');
+    if (nodeModulesTail) identities.add(stableIdentity(`node_modules:${nodeModulesTail}`));
+  }
+
+  const displayName = displayNameFromSource(source);
+  if (displayName) identities.add(stableIdentity(`name:${displayName}`));
+  return Array.from(identities);
+}
+
+function tailAfterSegment(value: string, segment: string): string | null {
+  const parts = value.split('/').filter(Boolean);
+  const index = parts.lastIndexOf(segment);
+  if (index < 0 || index >= parts.length - 1) return null;
+  return parts.slice(index + 1).join('/');
+}
+
+function isExternalPackageSource(source: string): boolean {
+  return /^[a-z][a-z\d+.-]*:/i.test(source) && !path.isAbsolute(source);
+}
+
+function stablePath(value: string): string {
+  return value.trim().replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+}
+
+function stableIdentity(value: string): string {
+  return value.trim().replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+}
+
+function pathIdentity(value: string): string {
+  return path.resolve(value).replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
 }
 
 function resolveMarketplaceTemplateSource(relativePath: string[]): { source: string; candidates: string[]; available: boolean; unavailableReason?: string } {

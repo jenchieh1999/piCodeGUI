@@ -70,6 +70,8 @@ export interface WorkspaceTreeResult {
   state: 'ok' | 'missing' | 'error';
   path: string;
   entries: WorkspaceTreeEntry[];
+  truncated?: boolean;
+  totalEntries?: number;
   error?: string;
 }
 
@@ -126,6 +128,8 @@ export interface WorkspaceSearchResult {
   state: 'ok' | 'missing' | 'error';
   query: string;
   files: WorkspaceTreeEntry[];
+  indexedFileCount?: number;
+  truncated?: boolean;
   error?: string;
 }
 
@@ -137,8 +141,15 @@ export interface WorkspaceHttpResponse {
 const MAX_TEXT_FILE_BYTES = 1024 * 1024;
 const MAX_IMAGE_FILE_BYTES = 2 * 1024 * 1024;
 const SEARCH_LIMIT = 80;
+const SEARCH_INDEX_TTL_MS = 30_000;
+const SEARCH_INDEX_MAX_FILES = 350_000;
+const SEARCH_INDEX_GIT_TIMEOUT_MS = 8_000;
+const GIT_OUTPUT_MAX_BUFFER_BYTES = 128 * 1024 * 1024;
+const TREE_CACHE_TTL_MS = 15_000;
+const TREE_ENTRY_LIMIT = 2_000;
 const SKIPPED_DIRS = new Set([
   '.git',
+  '.history',
   '.pi-agent-desktop',
   'node_modules',
   'dist',
@@ -153,6 +164,30 @@ const SKIPPED_DIRS = new Set([
 ]);
 
 const IGNORED_FS_ERROR_CODES = new Set(['EACCES', 'EPERM', 'EBUSY', 'ENOENT', 'ENOTDIR']);
+
+interface WorkspaceFileIndexEntry extends WorkspaceTreeEntry {
+  depth: number;
+  lowerName: string;
+  lowerPath: string;
+}
+
+interface SortableWorkspaceTreeEntry extends WorkspaceTreeEntry {
+  sortName: string;
+}
+
+interface WorkspaceFileIndex {
+  createdAt: number;
+  files: WorkspaceFileIndexEntry[];
+  truncated: boolean;
+}
+
+interface WorkspaceTreeCacheEntry {
+  createdAt: number;
+  result: WorkspaceTreeResult;
+}
+
+const workspaceFileIndexCache = new Map<string, WorkspaceFileIndex>();
+const workspaceTreeCache = new Map<string, WorkspaceTreeCacheEntry>();
 
 export async function handleWorkspaceRequest(rawUrl: string, method: string, req?: NodeJS.ReadableStream): Promise<WorkspaceHttpResponse | null> {
   const url = new URL(rawUrl, 'http://127.0.0.1');
@@ -438,41 +473,54 @@ export function applyWorkspaceGitOperation(
 
 export function getWorkspaceTree(sessionId: string, workspacePath = ''): WorkspaceTreeResult {
   const workspace = resolveWorkspace(sessionId);
+  const normalizedPath = normalizeWorkspacePath(workspacePath);
   if (!workspace.ok) {
-    return { state: 'missing', path: workspacePath, entries: [], error: workspace.error };
+    return { state: 'missing', path: normalizedPath, entries: [], error: workspace.error };
   }
 
   try {
+    const cached = getCachedWorkspaceTree(sessionId, workspace.workDir, normalizedPath);
+    if (cached) return cached;
+
     const absolute = resolveInsideWorkspace(workspace.workDir, workspacePath);
     if (!isAccessibleDirectory(absolute)) {
-      return { state: 'missing', path: normalizeWorkspacePath(workspacePath), entries: [] };
+      return { state: 'missing', path: normalizedPath, entries: [] };
     }
 
     const directoryEntries = readDirectoryEntries(absolute);
     if (!directoryEntries) {
-      return { state: 'ok', path: normalizeWorkspacePath(workspacePath), entries: [] };
+      const result: WorkspaceTreeResult = { state: 'ok', path: normalizedPath, entries: [] };
+      setCachedWorkspaceTree(sessionId, workspace.workDir, normalizedPath, result);
+      return result;
     }
 
-    const entries = directoryEntries
-      .filter((entry) => !shouldSkipEntry(entry.name, entry.isDirectory()))
-      .map<WorkspaceTreeEntry>((entry) => {
-        const relative = joinWorkspacePath(workspacePath, entry.name);
-        return {
-          name: entry.name,
-          path: relative,
-          isDirectory: entry.isDirectory(),
-        };
-      })
-      .sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.name.localeCompare(b.name);
+    const allEntries: SortableWorkspaceTreeEntry[] = [];
+    for (const entry of directoryEntries) {
+      const isDirectory = entry.isDirectory();
+      if (shouldSkipEntry(entry.name, isDirectory)) continue;
+      allEntries.push({
+        name: entry.name,
+        path: joinWorkspacePath(normalizedPath, entry.name),
+        isDirectory,
+        sortName: entry.name.toLowerCase(),
       });
+    }
+    allEntries.sort(compareWorkspaceTreeEntries);
 
-    return { state: 'ok', path: normalizeWorkspacePath(workspacePath), entries };
+    const entries = allEntries.slice(0, TREE_ENTRY_LIMIT).map(toWorkspaceTreeEntry);
+    const result: WorkspaceTreeResult = {
+      state: 'ok',
+      path: normalizedPath,
+      entries,
+      truncated: entries.length < allEntries.length,
+      totalEntries: allEntries.length,
+    };
+    setCachedWorkspaceTree(sessionId, workspace.workDir, normalizedPath, result);
+    return result;
   } catch (err) {
     return {
       state: 'error',
-      path: normalizeWorkspacePath(workspacePath),
+      path: normalizedPath,
       entries: [],
       error: err instanceof Error ? err.message : String(err),
     };
@@ -559,6 +607,7 @@ export function writeWorkspaceFile(sessionId: string, workspacePath: string, con
 
     writeFileSync(absolute, content, 'utf8');
     const stat = statSync(absolute);
+    invalidateWorkspaceCaches(sessionId, workspace.workDir);
     return {
       state: 'ok',
       path: normalized,
@@ -590,6 +639,7 @@ export function deleteWorkspacePath(sessionId: string, workspacePath: string): W
       return { state: 'missing', path: normalized, error: `Path does not exist: ${normalized}` };
     }
     rmSync(absolute, { recursive: true, force: true });
+    invalidateWorkspaceCaches(sessionId, workspace.workDir);
     return { state: 'ok', path: normalized };
   } catch (err) {
     return {
@@ -633,6 +683,7 @@ export function moveWorkspacePath(sessionId: string, sourcePath: string, targetD
     }
 
     renameSync(sourceAbsolute, targetAbsolute);
+    invalidateWorkspaceCaches(sessionId, workspace.workDir);
     return { state: 'ok', sourcePath: normalizedSource, targetPath };
   } catch (err) {
     return {
@@ -692,6 +743,7 @@ export function copyWorkspacePath(sessionId: string, sourcePath: string, targetD
     const targetPath = resolveAvailableCopyPath(workspace.workDir, normalizedTargetDirectory, sourceName);
     const targetAbsolute = resolveInsideWorkspace(workspace.workDir, targetPath);
     cpSync(sourceAbsolute, targetAbsolute, { recursive: true, errorOnExist: true, force: false });
+    invalidateWorkspaceCaches(sessionId, workspace.workDir);
     return { state: 'ok', sourcePath: normalizedSource, targetPath };
   } catch (err) {
     return {
@@ -740,48 +792,50 @@ export function getWorkspaceDiff(sessionId: string, workspacePath: string): Work
 
 export function searchWorkspaceFiles(sessionId: string, query: string): WorkspaceSearchResult {
   const workspace = resolveWorkspace(sessionId);
-  const normalizedQuery = query.trim().toLowerCase();
   if (!workspace.ok) {
     return { state: 'missing', query, files: [], error: workspace.error };
   }
 
   try {
-    const matches: Array<{ entry: WorkspaceTreeEntry; score: number }> = [];
-    const stack = [''];
+    const searchQuery = createWorkspaceSearchQuery(query, workspace.workDir);
+    const index = getWorkspaceFileIndex(sessionId, workspace.workDir);
+    const matches = new Map<string, { entry: WorkspaceTreeEntry; score: number }>();
     const matchLimit = SEARCH_LIMIT * 5;
 
-    while (stack.length > 0 && matches.length < matchLimit) {
-      const current = stack.pop()!;
-      const absolute = resolveInsideWorkspace(workspace.workDir, current);
-      if (!isAccessibleDirectory(absolute)) continue;
+    const directEntry = createDirectSearchEntry(workspace.workDir, searchQuery.directPath);
+    if (directEntry) {
+      matches.set(directEntry.path, {
+        entry: { name: directEntry.name, path: directEntry.path, isDirectory: false },
+        score: -100,
+      });
+    }
 
-      const entries = readDirectoryEntries(absolute);
-      if (!entries) continue;
-
-      for (const entry of entries) {
-        if (shouldSkipEntry(entry.name, entry.isDirectory())) continue;
-        const relative = joinWorkspacePath(current, entry.name);
-        if (entry.isDirectory()) {
-          stack.push(relative);
-        } else {
-          const score = scoreWorkspaceSearchResult(relative, normalizedQuery);
-          if (score !== null) {
-            matches.push({
-              entry: { name: entry.name, path: relative, isDirectory: false },
-              score,
-            });
-            if (matches.length >= matchLimit) break;
-          }
+    for (const entry of index.files) {
+      const score = scoreWorkspaceSearchResult(entry, searchQuery.variants);
+      if (score !== null) {
+        const existing = matches.get(entry.path);
+        if (!existing || score < existing.score) {
+          matches.set(entry.path, {
+            entry: { name: entry.name, path: entry.path, isDirectory: false },
+            score,
+          });
         }
+        if (!searchQuery.hasQuery && matches.size >= matchLimit) break;
       }
     }
 
-    const files = matches
+    const files = Array.from(matches.values())
       .sort((a, b) => a.score - b.score || a.entry.path.localeCompare(b.entry.path))
       .slice(0, SEARCH_LIMIT)
       .map((match) => match.entry);
 
-    return { state: 'ok', query, files };
+    return {
+      state: 'ok',
+      query,
+      files,
+      indexedFileCount: index.files.length,
+      truncated: index.truncated,
+    };
   } catch (err) {
     return {
       state: 'error',
@@ -792,30 +846,292 @@ export function searchWorkspaceFiles(sessionId: string, query: string): Workspac
   }
 }
 
-function scoreWorkspaceSearchResult(filePath: string, query: string): number | null {
-  if (!query) return filePath.split('/').length * 10 + filePath.length / 1000;
+function scoreWorkspaceSearchResult(entry: WorkspaceFileIndexEntry, queries: string[]): number | null {
+  let best: number | null = null;
+  for (const query of queries) {
+    const score = scoreWorkspaceSearchVariant(entry, query);
+    if (score !== null && (best === null || score < best)) best = score;
+  }
+  return best;
+}
 
-  const lowerPath = filePath.toLowerCase();
-  const lowerName = path.basename(lowerPath);
-  const basenameIndex = lowerName.indexOf(query);
+function scoreWorkspaceSearchVariant(entry: WorkspaceFileIndexEntry, query: string): number | null {
+  if (!query) return entry.depth * 10 + entry.path.length / 1000;
+
+  const basenameIndex = entry.lowerName.indexOf(query);
+  if (entry.lowerName === query) {
+    return entry.depth + entry.lowerName.length / 1000;
+  }
+  if (entry.lowerName.startsWith(query)) {
+    return 8 + entry.depth + entry.lowerName.length / 1000;
+  }
   if (basenameIndex >= 0) {
-    return basenameIndex + 20 + lowerName.length / 1000;
+    return basenameIndex + 24 + entry.lowerName.length / 1000;
   }
 
-  const pathIndex = lowerPath.indexOf(query);
+  if (entry.lowerPath === query) {
+    return 16 + entry.depth + entry.lowerPath.length / 1000;
+  }
+  if (entry.lowerPath.startsWith(query)) {
+    return 32 + entry.depth + entry.lowerPath.length / 1000;
+  }
+
+  const pathIndex = entry.lowerPath.indexOf(query);
   if (pathIndex >= 0) {
-    return pathIndex + 80 + lowerPath.length / 1000;
+    return pathIndex + 80 + entry.lowerPath.length / 1000;
   }
 
   let cursor = 0;
   let score = 140;
   for (const char of query) {
-    const next = lowerPath.indexOf(char, cursor);
+    const next = entry.lowerPath.indexOf(char, cursor);
     if (next < 0) return null;
     score += next - cursor;
     cursor = next + 1;
   }
-  return score + lowerPath.length / 1000;
+  return score + entry.lowerPath.length / 1000;
+}
+
+function createWorkspaceSearchQuery(query: string, workDir: string): { variants: string[]; directPath: string; hasQuery: boolean } {
+  const raw = query.trim();
+  if (!raw) return { variants: [''], directPath: '', hasQuery: false };
+
+  const variants = new Set<string>();
+  const normalizedRaw = normalizeWorkspaceSearchText(raw);
+  variants.add(normalizedRaw);
+
+  const relativePath = searchQueryToWorkspacePath(raw, workDir);
+  if (relativePath) {
+    variants.add(relativePath.toLowerCase());
+    const basename = path.posix.basename(relativePath).toLowerCase();
+    if (basename) variants.add(basename);
+  } else if (/[\\/]/.test(raw)) {
+    const basename = path.posix.basename(normalizedRaw).toLowerCase();
+    if (basename) variants.add(basename);
+  }
+
+  return {
+    variants: Array.from(variants).filter(Boolean),
+    directPath: relativePath,
+    hasQuery: true,
+  };
+}
+
+function normalizeWorkspaceSearchText(value: string): string {
+  return value
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/\/+$/g, '')
+    .toLowerCase();
+}
+
+function searchQueryToWorkspacePath(query: string, workDir: string): string {
+  const trimmed = query.trim();
+  if (!trimmed) return '';
+
+  try {
+    const absolute = path.isAbsolute(trimmed)
+      ? path.resolve(trimmed)
+      : path.resolve(workDir, normalizeWorkspacePath(trimmed));
+    const relative = path.relative(path.resolve(workDir), absolute);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return '';
+    return normalizeWorkspacePath(relative);
+  } catch {
+    return '';
+  }
+}
+
+function createDirectSearchEntry(workDir: string, workspacePath: string): WorkspaceFileIndexEntry | null {
+  if (!workspacePath) return null;
+  try {
+    const absolute = resolveInsideWorkspace(workDir, workspacePath);
+    if (!existsSync(absolute) || !statSync(absolute).isFile()) return null;
+    return createWorkspaceFileIndexEntry(workspacePath);
+  } catch {
+    return null;
+  }
+}
+
+function getWorkspaceFileIndex(sessionId: string, workDir: string): WorkspaceFileIndex {
+  const key = workspaceCacheKey(sessionId, workDir);
+  const cached = workspaceFileIndexCache.get(key);
+  const now = Date.now();
+  if (cached && now - cached.createdAt < SEARCH_INDEX_TTL_MS) {
+    return cached;
+  }
+
+  const index = buildWorkspaceFileIndex(workDir);
+  workspaceFileIndexCache.set(key, index);
+  return index;
+}
+
+function buildWorkspaceFileIndex(workDir: string): WorkspaceFileIndex {
+  const gitFiles = readGitWorkspaceFiles(workDir);
+  if (gitFiles) {
+    return {
+      createdAt: Date.now(),
+      files: gitFiles.files,
+      truncated: gitFiles.truncated,
+    };
+  }
+
+  const files: WorkspaceFileIndexEntry[] = [];
+  const stack = [''];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const absolute = resolveInsideWorkspace(workDir, current);
+    const entries = readDirectoryEntries(absolute);
+    if (!entries) continue;
+
+    for (const entry of entries) {
+      const isDirectory = entry.isDirectory();
+      if (shouldSkipEntry(entry.name, isDirectory)) continue;
+
+      const relative = joinWorkspacePath(current, entry.name);
+      if (isDirectory) {
+        stack.push(relative);
+        continue;
+      }
+
+      const file = createWorkspaceFileIndexEntry(relative);
+      if (!file) continue;
+      files.push(file);
+      if (files.length >= SEARCH_INDEX_MAX_FILES) {
+        return { createdAt: Date.now(), files, truncated: true };
+      }
+    }
+  }
+
+  return { createdAt: Date.now(), files, truncated: false };
+}
+
+function readGitWorkspaceFiles(workDir: string): { files: WorkspaceFileIndexEntry[]; truncated: boolean } | null {
+  const output = git(workDir, ['ls-files', '-co', '--exclude-standard', '-z'], true, SEARCH_INDEX_GIT_TIMEOUT_MS);
+  if (!output) return null;
+
+  const files: WorkspaceFileIndexEntry[] = [];
+  const seen = new Set<string>();
+  if (addGitOutputFiles(files, seen, output)) return { files, truncated: true };
+  if (addGitSubmoduleFiles(workDir, '', files, seen, 0)) return { files, truncated: true };
+
+  return { files, truncated: false };
+}
+
+function addGitOutputFiles(
+  files: WorkspaceFileIndexEntry[],
+  seen: Set<string>,
+  output: string,
+  prefix = '',
+): boolean {
+  for (const rawPath of output.split('\0')) {
+    if (!rawPath) continue;
+    const file = createWorkspaceFileIndexEntry(prefix ? joinWorkspacePath(prefix, rawPath) : rawPath);
+    if (!file || seen.has(file.path)) continue;
+    seen.add(file.path);
+    files.push(file);
+    if (files.length >= SEARCH_INDEX_MAX_FILES) return true;
+  }
+  return false;
+}
+
+function addGitSubmoduleFiles(
+  workDir: string,
+  prefix: string,
+  files: WorkspaceFileIndexEntry[],
+  seen: Set<string>,
+  depth: number,
+): boolean {
+  if (depth > 4) return false;
+  for (const submodulePath of readGitSubmodulePaths(workDir)) {
+    const absolute = path.join(workDir, submodulePath);
+    if (!isAccessibleDirectory(absolute)) continue;
+    const workspacePrefix = prefix ? joinWorkspacePath(prefix, submodulePath) : normalizeWorkspacePath(submodulePath);
+    const output = git(absolute, ['ls-files', '-co', '--exclude-standard', '-z'], true, SEARCH_INDEX_GIT_TIMEOUT_MS);
+    if (output && addGitOutputFiles(files, seen, output, workspacePrefix)) return true;
+    if (addGitSubmoduleFiles(absolute, workspacePrefix, files, seen, depth + 1)) return true;
+  }
+  return false;
+}
+
+function readGitSubmodulePaths(workDir: string): string[] {
+  const output = git(workDir, ['config', '--file', '.gitmodules', '--get-regexp', 'path'], true, SEARCH_INDEX_GIT_TIMEOUT_MS);
+  if (!output.trim()) return [];
+
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/).slice(1).join(' '))
+    .map(normalizeWorkspacePath)
+    .filter((submodulePath) => submodulePath && !pathHasSkippedSegment(submodulePath));
+}
+
+function createWorkspaceFileIndexEntry(rawPath: string): WorkspaceFileIndexEntry | null {
+  const normalized = normalizeWorkspacePath(rawPath);
+  if (!normalized || pathHasSkippedSegment(normalized)) return null;
+
+  const name = path.posix.basename(normalized);
+  if (!name) return null;
+
+  return {
+    name,
+    path: normalized,
+    isDirectory: false,
+    depth: normalized.split('/').length,
+    lowerName: name.toLowerCase(),
+    lowerPath: normalized.toLowerCase(),
+  };
+}
+
+function pathHasSkippedSegment(workspacePath: string): boolean {
+  return workspacePath.split('/').some((segment) => SKIPPED_DIRS.has(segment));
+}
+
+function getCachedWorkspaceTree(sessionId: string, workDir: string, workspacePath: string): WorkspaceTreeResult | null {
+  const cached = workspaceTreeCache.get(workspaceTreeCacheKey(sessionId, workDir, workspacePath));
+  if (!cached || Date.now() - cached.createdAt >= TREE_CACHE_TTL_MS) return null;
+  return cached.result;
+}
+
+function setCachedWorkspaceTree(sessionId: string, workDir: string, workspacePath: string, result: WorkspaceTreeResult): void {
+  workspaceTreeCache.set(workspaceTreeCacheKey(sessionId, workDir, workspacePath), {
+    createdAt: Date.now(),
+    result,
+  });
+}
+
+function invalidateWorkspaceCaches(sessionId: string, workDir: string): void {
+  const prefix = `${workspaceCacheKey(sessionId, workDir)}\0`;
+  workspaceFileIndexCache.delete(workspaceCacheKey(sessionId, workDir));
+  for (const key of workspaceTreeCache.keys()) {
+    if (key.startsWith(prefix)) {
+      workspaceTreeCache.delete(key);
+    }
+  }
+}
+
+function workspaceCacheKey(sessionId: string, workDir: string): string {
+  return `${sessionId}\0${path.resolve(workDir)}`;
+}
+
+function workspaceTreeCacheKey(sessionId: string, workDir: string, workspacePath: string): string {
+  return `${workspaceCacheKey(sessionId, workDir)}\0tree\0${normalizeWorkspacePath(workspacePath)}`;
+}
+
+function compareWorkspaceTreeEntries(a: SortableWorkspaceTreeEntry, b: SortableWorkspaceTreeEntry): number {
+  if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+  if (a.sortName < b.sortName) return -1;
+  if (a.sortName > b.sortName) return 1;
+  if (a.name < b.name) return -1;
+  if (a.name > b.name) return 1;
+  return 0;
+}
+
+function toWorkspaceTreeEntry(entry: SortableWorkspaceTreeEntry): WorkspaceTreeEntry {
+  return {
+    name: entry.name,
+    path: entry.path,
+    isDirectory: entry.isDirectory,
+  };
 }
 
 function acceptWorkspaceChange(workDir: string, workspacePath: string, oldPath?: string): void {
@@ -1111,7 +1427,7 @@ function git(workDir: string, args: string[], allowFailure = false, timeout = 50
     return execFileSync('git', args, {
       cwd: workDir,
       encoding: 'utf8',
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: GIT_OUTPUT_MAX_BUFFER_BYTES,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout,
       windowsHide: true,
