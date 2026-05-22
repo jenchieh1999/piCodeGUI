@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useChatStore } from './stores/chatStore';
 import { useExtensionStore, useUIStore, useSettingsStore } from './stores';
 import { piApi } from './api/client';
@@ -7,11 +7,7 @@ import { ChatView } from './components/chat/ChatView';
 import { EmptyState } from './components/shared/EmptyState';
 import { DesktopTitleBar } from './components/desktop/DesktopTitleBar';
 import { ProjectLauncher } from './components/shared/ProjectLauncher';
-import { isMarkdownStandaloneRoute, MarkdownStandaloneView } from './components/markdown/MarkdownStandaloneView';
-import { isWorkspaceFileStandaloneRoute, WorkspaceFileStandaloneView } from './components/workspace/WorkspaceFileStandaloneView';
 import { WorkspaceQuickOpen } from './components/workspace/WorkspaceQuickOpen';
-import { isTerminalStandaloneRoute, TerminalStandaloneView } from './components/terminal/TerminalStandaloneView';
-import { isStandaloneTabsRoute, StandaloneTabsView } from './components/standalone/StandaloneTabsView';
 import { applyRuntimeSettings } from './lib/runtimeSettings';
 import { createNewSessionFromPicker, OPEN_PROJECTS_EVENT } from './lib/sessionActions';
 import { useI18n } from './lib/i18n';
@@ -27,22 +23,42 @@ const AgentsRoomView = lazy(() => import('./components/agents-room/AgentsRoomVie
 const SkillsView = lazy(() => import('./components/skills/SkillsView').then((m) => ({ default: m.SkillsView })));
 const ScheduledTasksView = lazy(() => import('./components/tasks/ScheduledTasksView').then((m) => ({ default: m.ScheduledTasksView })));
 const DesktopDiagnostics = lazy(() => import('./components/desktop/DesktopDiagnostics').then((m) => ({ default: m.DesktopDiagnostics })));
+const MarkdownStandaloneView = lazy(() => import('./components/markdown/MarkdownStandaloneView').then((m) => ({ default: m.MarkdownStandaloneView })));
+const WorkspaceFileStandaloneView = lazy(() => import('./components/workspace/WorkspaceFileStandaloneView').then((m) => ({ default: m.WorkspaceFileStandaloneView })));
+const TerminalStandaloneView = lazy(() => import('./components/terminal/TerminalStandaloneView').then((m) => ({ default: m.TerminalStandaloneView })));
+const StandaloneTabsView = lazy(() => import('./components/standalone/StandaloneTabsView').then((m) => ({ default: m.StandaloneTabsView })));
 
 export default function App() {
-  if (isStandaloneTabsRoute()) {
-    return <StandaloneTabsView />;
+  switch (desktopViewRoute()) {
+    case 'standalone-tabs':
+      return <StandaloneRoute><StandaloneTabsView /></StandaloneRoute>;
+    case 'markdown':
+      return <StandaloneRoute><MarkdownStandaloneView /></StandaloneRoute>;
+    case 'workspace-file':
+      return <StandaloneRoute><WorkspaceFileStandaloneView /></StandaloneRoute>;
+    case 'terminal':
+      return <StandaloneRoute><TerminalStandaloneView /></StandaloneRoute>;
+    default:
+      return <MainApp />;
   }
-  if (isMarkdownStandaloneRoute()) {
-    return <MarkdownStandaloneView />;
-  }
-  if (isWorkspaceFileStandaloneRoute()) {
-    return <WorkspaceFileStandaloneView />;
-  }
-  if (isTerminalStandaloneRoute()) {
-    return <TerminalStandaloneView />;
-  }
+}
 
-  return <MainApp />;
+function desktopViewRoute(): string | null {
+  if (typeof window === 'undefined') return null;
+  return new URLSearchParams(window.location.search).get('desktopView');
+}
+
+function StandaloneRoute({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<StandaloneRouteLoading />}>{children}</Suspense>;
+}
+
+function StandaloneRouteLoading() {
+  return (
+    <div className="pi-shell flex h-screen w-screen items-center justify-center bg-pi-bg text-pi-muted">
+      <Loader2 size={18} className="mr-2 animate-spin" />
+      <span className="text-xs">Loading</span>
+    </div>
+  );
 }
 
 function MainApp() {

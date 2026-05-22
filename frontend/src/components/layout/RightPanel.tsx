@@ -31,6 +31,7 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  ClipboardPaste,
   Code2,
   Copy,
   Download,
@@ -48,6 +49,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Scissors,
   Square,
   Terminal as TerminalIcon,
   Trash2,
@@ -92,6 +94,15 @@ type LineSelection = {
   end: number;
 };
 
+type WorkspaceFileClipboard = {
+  action: 'copy' | 'cut';
+  entry: WorkspaceTreeEntry;
+};
+
+type WorkspaceFileUndoOperation =
+  | { kind: 'copy'; targetPath: string }
+  | { kind: 'move'; fromPath: string; toPath: string; entry: WorkspaceTreeEntry };
+
 type PreviewTabCloseScope = 'current' | 'others' | 'left' | 'right' | 'all';
 
 const STATUS_META: Record<WorkspaceChangedFile['status'], { label: string; className: string }> = {
@@ -108,6 +119,8 @@ const STATUS_META: Record<WorkspaceChangedFile['status'], { label: string; class
 const WORKSPACE_PREVIEW_DEFAULT_RATIO = 0.45;
 const WORKSPACE_PREVIEW_MIN_RATIO = 0.22;
 const WORKSPACE_PREVIEW_MAX_RATIO = 0.72;
+const WORKSPACE_TREE_ROW_HEIGHT = 28;
+const WORKSPACE_TREE_STICKY_MAX_DEPTH = 8;
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -906,6 +919,9 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
   const [isResizingPreview, setIsResizingPreview] = useState(false);
   const [revealedFilePath, setRevealedFilePath] = useState<string | null>(null);
   const [scrollTargetPath, setScrollTargetPath] = useState<string | null>(null);
+  const [selectedTreeEntry, setSelectedTreeEntry] = useState<WorkspaceTreeEntry | null>(null);
+  const [fileClipboard, setFileClipboard] = useState<WorkspaceFileClipboard | null>(null);
+  const [lastFileUndo, setLastFileUndo] = useState<WorkspaceFileUndoOperation | null>(null);
   const workspaceOpenRequest = useUIStore((s) => s.workspaceOpenRequest);
   const lastWorkspaceOpenRequestRef = useRef<number | null>(null);
 
@@ -1031,6 +1047,9 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
     setSelectedRangeByTab({});
     setRevealedFilePath(null);
     setScrollTargetPath(null);
+    setSelectedTreeEntry(null);
+    setFileClipboard(null);
+    setLastFileUndo(null);
     void loadStatus();
     void loadTree('');
   }, [sessionId, loadStatus, loadTree]);
@@ -1355,6 +1374,125 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
     }
   };
 
+  const selectWorkspaceEntry = (entry: WorkspaceTreeEntry) => {
+    setSelectedTreeEntry(entry);
+    setRevealedFilePath(entry.path);
+  };
+
+  const copyWorkspaceEntryToClipboard = (entry: WorkspaceTreeEntry) => {
+    setSelectedTreeEntry(entry);
+    setFileClipboard({ action: 'copy', entry });
+    addToast({ type: 'success', message: t('rightPanel.fileCopiedToClipboard', { path: entry.path }) });
+  };
+
+  const cutWorkspaceEntryToClipboard = (entry: WorkspaceTreeEntry) => {
+    setSelectedTreeEntry(entry);
+    setFileClipboard({ action: 'cut', entry });
+    addToast({ type: 'success', message: t('rightPanel.fileCutToClipboard', { path: entry.path }) });
+  };
+
+  const pasteWorkspaceClipboard = async (targetEntry?: WorkspaceTreeEntry | null) => {
+    const clipboard = fileClipboard;
+    if (!clipboard) {
+      addToast({ type: 'warning', message: t('rightPanel.fileClipboardEmpty') });
+      return;
+    }
+
+    const targetDirectory = workspacePasteTargetDirectory(targetEntry ?? selectedTreeEntry);
+
+    try {
+      const result = clipboard.action === 'copy'
+        ? await piApi.copyWorkspacePath(sessionId, clipboard.entry.path, targetDirectory)
+        : await piApi.moveWorkspacePath(sessionId, clipboard.entry.path, targetDirectory);
+
+      if (result.state !== 'ok') {
+        throw new Error(result.error ?? t('rightPanel.filePasteFailed'));
+      }
+
+      if (clipboard.action === 'cut') {
+        removePreviewTabsForPath(clipboard.entry.path);
+        setFileClipboard(null);
+        setLastFileUndo({ kind: 'move', fromPath: clipboard.entry.path, toPath: result.targetPath, entry: clipboard.entry });
+      } else {
+        setLastFileUndo({ kind: 'copy', targetPath: result.targetPath });
+      }
+
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        next.add('');
+        const normalizedTargetDirectory = normalizeWorkspaceFilePath(targetDirectory);
+        if (normalizedTargetDirectory) next.add(normalizedTargetDirectory);
+        for (const parentPath of parentWorkspacePaths(result.targetPath)) {
+          next.add(parentPath);
+        }
+        return next;
+      });
+      setSelectedTreeEntry({
+        ...clipboard.entry,
+        name: result.targetPath.split('/').filter(Boolean).pop() ?? clipboard.entry.name,
+        path: result.targetPath,
+      });
+      setRevealedFilePath(result.targetPath);
+      setScrollTargetPath(result.targetPath);
+      await refreshTreeAroundPaths([clipboard.entry.path, targetDirectory, result.targetPath]);
+      void loadStatus({ silent: true });
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t('rightPanel.filePasted') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileOperationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
+  const undoWorkspaceFileOperation = async () => {
+    const operation = lastFileUndo;
+    if (!operation) {
+      addToast({ type: 'warning', message: t('rightPanel.fileUndoNothing') });
+      return;
+    }
+
+    try {
+      if (operation.kind === 'copy') {
+        const result = await piApi.deleteWorkspacePath(sessionId, operation.targetPath);
+        if (result.state !== 'ok') {
+          throw new Error(result.error ?? t('rightPanel.fileDeleteFailed'));
+        }
+        removePreviewTabsForPath(operation.targetPath);
+        setSelectedTreeEntry(null);
+        setRevealedFilePath((current) => current === operation.targetPath ? null : current);
+        await refreshTreeAroundPaths([operation.targetPath]);
+      } else {
+        const result = await piApi.moveWorkspacePath(sessionId, operation.toPath, immediateParentWorkspacePath(operation.fromPath));
+        if (result.state !== 'ok') {
+          throw new Error(result.error ?? t('rightPanel.fileMoveFailed'));
+        }
+        removePreviewTabsForPath(operation.toPath);
+        setSelectedTreeEntry({
+          ...operation.entry,
+          name: operation.fromPath.split('/').filter(Boolean).pop() ?? operation.entry.name,
+          path: operation.fromPath,
+        });
+        setRevealedFilePath(operation.fromPath);
+        setScrollTargetPath(operation.fromPath);
+        await refreshTreeAroundPaths([operation.fromPath, operation.toPath]);
+      }
+
+      setLastFileUndo(null);
+      void loadStatus({ silent: true });
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t('rightPanel.fileUndoSuccess') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileUndoFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
   const revealWorkspacePathInExplorer = async (workspacePath: string) => {
     if (!window.piDesktop) {
       addToast({ type: 'warning', message: t('rightPanel.standaloneOnlyDesktop') });
@@ -1429,6 +1567,8 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
 
       removePreviewTabsForPath(entry.path);
       setRevealedFilePath((current) => current && isWorkspacePathWithin(current, entry.path) ? null : current);
+      setSelectedTreeEntry((current) => current && isWorkspacePathWithin(current.path, entry.path) ? null : current);
+      setFileClipboard((current) => current && isWorkspacePathWithin(current.entry.path, entry.path) ? null : current);
       await refreshTreeAroundPaths([entry.path]);
       void loadStatus({ silent: true });
       window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
@@ -1464,6 +1604,21 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
       });
       setRevealedFilePath(result.targetPath);
       setScrollTargetPath(result.targetPath);
+      setSelectedTreeEntry({
+        name: result.targetPath.split('/').filter(Boolean).pop() ?? payload.name,
+        path: result.targetPath,
+        isDirectory: payload.isDirectory,
+      });
+      setLastFileUndo({
+        kind: 'move',
+        fromPath: payload.path,
+        toPath: result.targetPath,
+        entry: {
+          name: payload.name,
+          path: payload.path,
+          isDirectory: payload.isDirectory,
+        },
+      });
       await refreshTreeAroundPaths([payload.path, targetDirectory, result.targetPath]);
       void loadStatus({ silent: true });
       window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
@@ -1577,6 +1732,30 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
       });
     } finally {
       setBusyChangeKey(null);
+    }
+  };
+
+  const handleFilesKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (mode !== 'files') return;
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    if (isEditableEventTarget(event.target)) return;
+    if (window.getSelection()?.toString()) return;
+
+    const key = event.key.toLowerCase();
+    if (key === 'c') {
+      if (!selectedTreeEntry) return;
+      event.preventDefault();
+      copyWorkspaceEntryToClipboard(selectedTreeEntry);
+    } else if (key === 'x') {
+      if (!selectedTreeEntry) return;
+      event.preventDefault();
+      cutWorkspaceEntryToClipboard(selectedTreeEntry);
+    } else if (key === 'v') {
+      event.preventDefault();
+      void pasteWorkspaceClipboard(selectedTreeEntry);
+    } else if (key === 'z') {
+      event.preventDefault();
+      void undoWorkspaceFileOperation();
     }
   };
 
@@ -1699,11 +1878,15 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
                     query={query}
                     revealedPath={revealedFilePath}
                     scrollTargetPath={scrollTargetPath}
+                    selectedPath={selectedTreeEntry?.path ?? null}
+                    canPaste={Boolean(fileClipboard)}
+                    canUndo={Boolean(lastFileUndo)}
                     onToggle={toggleTreePath}
                     onOpen={(path) => {
                       setRevealedFilePath(path);
                       void openPreview({ kind: 'file', path });
                     }}
+                    onSelect={selectWorkspaceEntry}
                     onScrollTargetSettled={(path) => {
                       setScrollTargetPath((current) => current === path ? null : current);
                     }}
@@ -1712,8 +1895,13 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
                     onOpenStandalone={(entry) => void openWorkspaceEntryStandalone(entry)}
                     onDetachStandalone={(entry, screenPoint) => void detachWorkspaceEntryStandalone(entry, screenPoint)}
                     onRevealInExplorer={(entry) => void revealWorkspacePathInExplorer(entry.path)}
+                    onCopy={(entry) => copyWorkspaceEntryToClipboard(entry)}
+                    onCut={(entry) => cutWorkspaceEntryToClipboard(entry)}
+                    onPaste={(entry) => void pasteWorkspaceClipboard(entry)}
+                    onUndo={() => void undoWorkspaceFileOperation()}
                     onCopyPath={(entry) => void copyWorkspaceEntryPath(entry)}
                     onDelete={(entry) => void deleteWorkspaceEntry(entry)}
+                    onKeyDown={handleFilesKeyDown}
                   />
                 )}
               </div>
@@ -2162,16 +2350,25 @@ function FilesTree({
   query,
   revealedPath,
   scrollTargetPath,
+  selectedPath,
+  canPaste,
+  canUndo,
   onToggle,
   onOpen,
+  onSelect,
   onScrollTargetSettled,
   onMove,
   onAddToChat,
   onOpenStandalone,
   onDetachStandalone,
   onRevealInExplorer,
+  onCopy,
+  onCut,
+  onPaste,
+  onUndo,
   onCopyPath,
   onDelete,
+  onKeyDown,
 }: {
   sessionId: string;
   root?: WorkspaceTreeResult;
@@ -2181,16 +2378,25 @@ function FilesTree({
   query: string;
   revealedPath: string | null;
   scrollTargetPath: string | null;
+  selectedPath: string | null;
+  canPaste: boolean;
+  canUndo: boolean;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
+  onSelect: (entry: WorkspaceTreeEntry) => void;
   onScrollTargetSettled: (path: string) => void;
   onMove: (payload: WorkspaceFileDragPayload, targetDirectory: string) => void;
   onAddToChat: (entry: WorkspaceTreeEntry) => void;
   onOpenStandalone: (entry: WorkspaceTreeEntry) => void;
   onDetachStandalone: (entry: WorkspaceTreeEntry, screenPoint?: { x: number; y: number }) => void;
   onRevealInExplorer: (entry: WorkspaceTreeEntry) => void;
+  onCopy: (entry: WorkspaceTreeEntry) => void;
+  onCut: (entry: WorkspaceTreeEntry) => void;
+  onPaste: (entry: WorkspaceTreeEntry | null) => void;
+  onUndo: () => void;
   onCopyPath: (entry: WorkspaceTreeEntry) => void;
   onDelete: (entry: WorkspaceTreeEntry) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
 }) {
   const { t } = useI18n();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: WorkspaceTreeEntry } | null>(null);
@@ -2236,7 +2442,13 @@ function FilesTree({
   };
 
   return (
-    <div className="py-1" onDragOver={handleRootDragOver} onDrop={handleRootDrop}>
+    <div
+      className="py-1 outline-none"
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      onDragOver={handleRootDragOver}
+      onDrop={handleRootDrop}
+    >
       <TreeEntries
         sessionId={sessionId}
         entries={root.entries}
@@ -2246,9 +2458,11 @@ function FilesTree({
         query={query.trim().toLowerCase()}
         revealedPath={revealedPath}
         scrollTargetPath={scrollTargetPath}
+        selectedPath={selectedPath}
         depth={0}
         onToggle={onToggle}
         onOpen={onOpen}
+        onSelect={onSelect}
         onScrollTargetSettled={onScrollTargetSettled}
         onMove={onMove}
         onAddToChat={onAddToChat}
@@ -2257,6 +2471,7 @@ function FilesTree({
         onContextMenu={(event, entry) => {
           event.preventDefault();
           event.stopPropagation();
+          onSelect(entry);
           setContextMenu({ x: event.clientX, y: event.clientY, entry });
         }}
       />
@@ -2283,6 +2498,24 @@ function FilesTree({
             setContextMenu(null);
             onCopyPath(entry);
           }}
+          onCopy={(entry) => {
+            setContextMenu(null);
+            onCopy(entry);
+          }}
+          onCut={(entry) => {
+            setContextMenu(null);
+            onCut(entry);
+          }}
+          onPaste={(entry) => {
+            setContextMenu(null);
+            onPaste(entry);
+          }}
+          onUndo={() => {
+            setContextMenu(null);
+            onUndo();
+          }}
+          canPaste={canPaste}
+          canUndo={canUndo}
           onDelete={(entry) => {
             setContextMenu(null);
             onDelete(entry);
@@ -2303,9 +2536,11 @@ function TreeEntries({
   query,
   revealedPath,
   scrollTargetPath,
+  selectedPath,
   depth,
   onToggle,
   onOpen,
+  onSelect,
   onScrollTargetSettled,
   onMove,
   onAddToChat,
@@ -2321,9 +2556,11 @@ function TreeEntries({
   query: string;
   revealedPath: string | null;
   scrollTargetPath: string | null;
+  selectedPath: string | null;
   depth: number;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
+  onSelect: (entry: WorkspaceTreeEntry) => void;
   onScrollTargetSettled: (path: string) => void;
   onMove: (payload: WorkspaceFileDragPayload, targetDirectory: string) => void;
   onAddToChat: (entry: WorkspaceTreeEntry) => void;
@@ -2343,7 +2580,10 @@ function TreeEntries({
         const loading = loadingByPath[entry.path];
         const Icon = entry.isDirectory ? (expanded ? FolderOpen : Folder) : File;
         const revealed = revealedPath === entry.path;
+        const selected = selectedPath === entry.path;
         const dropTarget = dropTargetPath === entry.path;
+        const stickyFolder = entry.isDirectory && expanded;
+        const stickyDepth = Math.min(depth, WORKSPACE_TREE_STICKY_MAX_DEPTH);
 
         return (
           <div key={entry.path}>
@@ -2357,7 +2597,10 @@ function TreeEntries({
                   });
                 }
               }}
-              onClick={() => entry.isDirectory ? onToggle(entry.path) : onOpen(entry.path)}
+              onClick={() => {
+                onSelect(entry);
+                entry.isDirectory ? onToggle(entry.path) : onOpen(entry.path);
+              }}
               onContextMenuCapture={(event) => onContextMenu(event, entry)}
               onDragStart={(event) => {
                 setWorkspaceFileDragData(
@@ -2401,12 +2644,18 @@ function TreeEntries({
               }}
               className={cn(
                 'group w-full flex items-center gap-1.5 h-7 pr-2 text-left text-xs transition-colors',
+                stickyFolder && 'sticky shadow-[0_1px_0_var(--pi-border)] backdrop-blur supports-[backdrop-filter]:bg-pi-bg/85',
+                stickyFolder && !dropTarget && !(revealed || selected) && 'bg-pi-bg/95',
                 dropTarget && 'bg-pi-accent/10 text-pi-accent ring-1 ring-inset ring-pi-accent/40',
-                revealed
+                (revealed || selected)
                   ? 'bg-pi-selected-bg text-pi-accent ring-1 ring-inset ring-pi-accent/35'
                   : 'text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover'
               )}
-              style={{ paddingLeft: 8 + depth * 14 }}
+              style={{
+                paddingLeft: 8 + depth * 14,
+                top: stickyFolder ? stickyDepth * WORKSPACE_TREE_ROW_HEIGHT : undefined,
+                zIndex: stickyFolder ? 50 + stickyDepth : undefined,
+              }}
               title={entry.path}
             >
               {entry.isDirectory ? (
@@ -2440,9 +2689,11 @@ function TreeEntries({
                 query={query}
                 revealedPath={revealedPath}
                 scrollTargetPath={scrollTargetPath}
+                selectedPath={selectedPath}
                 depth={depth + 1}
                 onToggle={onToggle}
                 onOpen={onOpen}
+                onSelect={onSelect}
                 onScrollTargetSettled={onScrollTargetSettled}
                 onMove={onMove}
                 onAddToChat={onAddToChat}
@@ -2469,16 +2720,28 @@ function WorkspaceFileContextMenu({
   onAddToChat,
   onOpenStandalone,
   onRevealInExplorer,
+  onCopy,
+  onCut,
+  onPaste,
+  onUndo,
   onCopyPath,
   onDelete,
+  canPaste,
+  canUndo,
 }: {
   state: { x: number; y: number; entry: WorkspaceTreeEntry };
   onOpen: (entry: WorkspaceTreeEntry) => void;
   onAddToChat: (entry: WorkspaceTreeEntry) => void;
   onOpenStandalone: (entry: WorkspaceTreeEntry) => void;
   onRevealInExplorer: (entry: WorkspaceTreeEntry) => void;
+  onCopy: (entry: WorkspaceTreeEntry) => void;
+  onCut: (entry: WorkspaceTreeEntry) => void;
+  onPaste: (entry: WorkspaceTreeEntry) => void;
+  onUndo: () => void;
   onCopyPath: (entry: WorkspaceTreeEntry) => void;
   onDelete: (entry: WorkspaceTreeEntry) => void;
+  canPaste: boolean;
+  canUndo: boolean;
 }) {
   const { t } = useI18n();
   const menuLeft = typeof window === 'undefined'
@@ -2486,7 +2749,7 @@ function WorkspaceFileContextMenu({
     : Math.min(state.x, Math.max(8, window.innerWidth - 232));
   const menuTop = typeof window === 'undefined'
     ? state.y
-    : Math.min(state.y, Math.max(8, window.innerHeight - 236));
+    : Math.min(state.y, Math.max(8, window.innerHeight - 348));
   const entry = state.entry;
 
   return (
@@ -2515,6 +2778,21 @@ function WorkspaceFileContextMenu({
         icon={FolderOpen}
         label={t('rightPanel.fileMenu.revealInExplorer')}
         onClick={() => onRevealInExplorer(entry)}
+      />
+      <div className="my-1 h-px bg-pi-border/70" />
+      <WorkspaceFileMenuButton icon={Copy} label={t('rightPanel.fileMenu.copy')} onClick={() => onCopy(entry)} />
+      <WorkspaceFileMenuButton icon={Scissors} label={t('rightPanel.fileMenu.cut')} onClick={() => onCut(entry)} />
+      <WorkspaceFileMenuButton
+        icon={ClipboardPaste}
+        label={t('rightPanel.fileMenu.paste')}
+        disabled={!canPaste}
+        onClick={() => onPaste(entry)}
+      />
+      <WorkspaceFileMenuButton
+        icon={RotateCcw}
+        label={t('rightPanel.fileMenu.undo')}
+        disabled={!canUndo}
+        onClick={onUndo}
       />
       <div className="my-1 h-px bg-pi-border/70" />
       <WorkspaceFileMenuButton icon={Copy} label={t('rightPanel.fileMenu.copyPath')} onClick={() => onCopyPath(entry)} />
@@ -3028,6 +3306,11 @@ function immediateParentWorkspacePath(filePath: string): string {
   return parts.join('/');
 }
 
+function workspacePasteTargetDirectory(entry: WorkspaceTreeEntry | null | undefined): string {
+  if (!entry) return '';
+  return entry.isDirectory ? entry.path : immediateParentWorkspacePath(entry.path);
+}
+
 function parentWorkspacePaths(filePath: string): string[] {
   const parts = normalizeWorkspaceFilePath(filePath).split('/').filter(Boolean);
   const parents: string[] = [];
@@ -3067,6 +3350,13 @@ function shouldDetachWorkspaceDrag(event: DragEvent<HTMLElement>): boolean {
     clientX >= window.innerWidth - edgePadding ||
     clientY >= window.innerHeight - edgePadding
   );
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
 }
 
 function previewTitle(target: PreviewTarget): string {

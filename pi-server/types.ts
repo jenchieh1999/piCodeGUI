@@ -646,13 +646,47 @@ export interface RepositoryContextResultData {
   error?: string;
 }
 
+export type PromptOptimizeModeData = 'auto' | 'polish' | 'execute' | 'debug' | 'review' | 'research' | 'ui' | 'agent_room';
+
+export interface PromptOptimizeFileReferenceData {
+  path: string;
+  name?: string;
+  language?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  excerpt?: string;
+}
+
+export interface PromptOptimizeImageReferenceData {
+  fileName?: string;
+  mimeType?: string;
+  note?: string;
+}
+
+export interface PromptOptimizeSessionContextData {
+  title?: string;
+  lastUserMessage?: string;
+  lastAssistantSummary?: string;
+}
+
+export interface PromptOptimizeWorkspaceContextData {
+  branch?: string;
+  dirty?: boolean;
+  changedFiles?: Array<{ path: string; status: string }>;
+}
+
 export interface PromptOptimizeInputData {
   text: string;
+  mode?: PromptOptimizeModeData;
   projectName?: string;
   projectPath?: string;
   language?: 'zh' | 'en' | 'ja';
   hasFileReferences?: boolean;
   hasImages?: boolean;
+  fileReferences?: PromptOptimizeFileReferenceData[];
+  imageReferences?: PromptOptimizeImageReferenceData[];
+  sessionContext?: PromptOptimizeSessionContextData;
+  workspaceContext?: PromptOptimizeWorkspaceContextData;
   selectionOnly?: boolean;
   sessionId?: string;
   currentModel?: {
@@ -668,6 +702,11 @@ export interface PromptOptimizeResultData {
   provider?: string;
   modelId?: string;
   warning?: string;
+  mode?: PromptOptimizeModeData;
+  qualityScore?: number;
+  changedIntentRisk?: 'low' | 'medium' | 'high';
+  warnings?: string[];
+  fallbackReason?: string;
 }
 
 // WebSocket protocol messages

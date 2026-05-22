@@ -24,6 +24,7 @@ import type {
   ResourceTrustDecision,
   ResourceTrustKind,
   WorkspaceChangeOperationResult,
+  WorkspaceCopyFileResult,
   WorkspaceDeleteFileResult,
   WorkspaceDiffResult,
   WorkspaceGitOperationAction,
@@ -610,6 +611,17 @@ class PiApiClient {
   async moveWorkspacePath(sessionId: string, sourcePath: string, targetDirectory: string) {
     return this.request<WorkspaceMoveFileResult>(
       `/api/sessions/${encodeURIComponent(sessionId)}/workspace/move`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourcePath, targetDirectory }),
+      }
+    );
+  }
+
+  async copyWorkspacePath(sessionId: string, sourcePath: string, targetDirectory: string) {
+    return this.request<WorkspaceCopyFileResult>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace/copy`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

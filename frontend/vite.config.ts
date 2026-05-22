@@ -28,15 +28,30 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined;
-          if (id.includes('react-dom') || id.includes('react/')) return 'vendor-react';
-          if (id.includes('zustand')) return 'vendor-state';
-          if (id.includes('lucide-react')) return 'vendor-icons';
-          if (id.includes('@xterm')) return 'vendor-terminal';
-          if (id.includes('@codemirror') || id.includes('@lezer')) return 'vendor-codemirror';
-          if (id.includes('@radix-ui')) return 'vendor-radix';
-          if (id.includes('react-virtuoso')) return 'vendor-virtuoso';
-          if (id.includes('marked') || id.includes('dompurify')) return 'vendor-markdown';
+          const normalizedId = id.replace(/\\/g, '/');
+          if (!normalizedId.includes('node_modules')) return undefined;
+          if (normalizedId.includes('react-dom') || normalizedId.includes('react/')) return 'vendor-react';
+          if (normalizedId.includes('zustand')) return 'vendor-state';
+          if (normalizedId.includes('lucide-react')) return 'vendor-icons';
+          if (normalizedId.includes('@xterm')) return 'vendor-terminal';
+          if (normalizedId.includes('@codemirror/lang-javascript')) return 'codemirror-lang-javascript';
+          if (normalizedId.includes('@codemirror/lang-json')) return 'codemirror-lang-json';
+          if (normalizedId.includes('@codemirror/lang-html')) return 'codemirror-lang-html';
+          if (normalizedId.includes('@codemirror/lang-css')) return 'codemirror-lang-css';
+          if (normalizedId.includes('@codemirror/lang-markdown')) return 'codemirror-lang-markdown';
+          if (normalizedId.includes('@codemirror/lang-python')) return 'codemirror-lang-python';
+          if (normalizedId.includes('@codemirror/lang-sql')) return 'codemirror-lang-sql';
+          if (normalizedId.includes('@codemirror/lang-xml')) return 'codemirror-lang-xml';
+          if (normalizedId.includes('@codemirror/lang-yaml')) return 'codemirror-lang-yaml';
+          if (normalizedId.includes('@codemirror/lang-java')) return 'codemirror-lang-java';
+          if (normalizedId.includes('@codemirror/lang-cpp')) return 'codemirror-lang-cpp';
+          if (normalizedId.includes('@codemirror/lang-php')) return 'codemirror-lang-php';
+          if (normalizedId.includes('@codemirror/lang-rust')) return 'codemirror-lang-rust';
+          if (normalizedId.includes('@codemirror/legacy-modes')) return 'codemirror-legacy-modes';
+          if (normalizedId.includes('@codemirror')) return 'vendor-codemirror-core';
+          if (normalizedId.includes('@radix-ui')) return 'vendor-radix';
+          if (normalizedId.includes('react-virtuoso')) return 'vendor-virtuoso';
+          if (normalizedId.includes('marked') || normalizedId.includes('dompurify')) return 'vendor-markdown';
           return undefined;
         },
       },

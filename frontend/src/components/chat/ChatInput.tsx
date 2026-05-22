@@ -16,6 +16,11 @@ import type {
   ImageAttachment,
   ModelInfo,
   PermissionMode,
+  PromptOptimizeFileReference,
+  PromptOptimizeImageReference,
+  PromptOptimizeMode,
+  PromptOptimizeSessionContext,
+  PromptOptimizeWorkspaceContext,
   Session,
   SlashCommandInfo,
   ThinkingLevel,
@@ -37,6 +42,8 @@ import {
   AtSign,
   Bot,
   Brain,
+  Check,
+  ChevronDown,
   Command,
   FileText,
   Gauge,
@@ -49,6 +56,7 @@ import {
   Shield,
   Sparkles,
   Square,
+  Undo2,
   X,
 } from 'lucide-react';
 
@@ -73,6 +81,13 @@ interface ComposerDraft {
   text: string;
   attachments: ImageAttachment[];
   fileReferences: WorkspaceFileReference[];
+}
+
+interface PromptOptimizationSnapshot {
+  originalText: string;
+  optimizedText: string;
+  selectionStart: number;
+  selectionEnd: number;
 }
 
 type WorkspaceReferenceEventDetail = {
@@ -147,6 +162,7 @@ const FALLBACK_SLASH_COMMANDS: Array<{
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const PERMISSION_MODE_OPTIONS: PermissionMode[] = ['ask', 'acceptEdits', 'plan', 'bypassPermissions'];
+const PROMPT_OPTIMIZE_MODES: PromptOptimizeMode[] = ['auto', 'polish', 'execute', 'debug', 'review', 'research', 'ui', 'agent_room'];
 
 export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputProps) {
   const { t } = useI18n();
@@ -165,9 +181,13 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const [atTokenStart, setAtTokenStart] = useState(-1);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
+  const [lastPromptOptimization, setLastPromptOptimization] = useState<PromptOptimizationSnapshot | null>(null);
+  const [promptOptimizeMode, setPromptOptimizeMode] = useState<PromptOptimizeMode>('auto');
+  const [showPromptOptimizeMenu, setShowPromptOptimizeMenu] = useState(false);
   const [openControlMenu, setOpenControlMenu] = useState<'model' | 'permission' | 'thinking' | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const promptOptimizeMenuRef = useRef<HTMLDivElement>(null);
   const controlBarRef = useRef<HTMLDivElement>(null);
   const searchRequestRef = useRef(0);
   const composingRef = useRef(false);
@@ -253,6 +273,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       setText(draft?.text ?? '');
       setAttachments(draft?.attachments ?? []);
       setFileReferences(draft?.fileReferences ?? []);
+      setLastPromptOptimization(null);
       currentSessionRef.current = sessionId;
     }
 
@@ -293,6 +314,25 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [openControlMenu]);
+
+  useEffect(() => {
+    if (!showPromptOptimizeMenu) return;
+
+    const close = (event: globalThis.MouseEvent) => {
+      if (promptOptimizeMenuRef.current?.contains(event.target as Node)) return;
+      setShowPromptOptimizeMenu(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setShowPromptOptimizeMenu(false);
+    };
+
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showPromptOptimizeMenu]);
 
   const addFileReference = useCallback((path: string, options?: {
     name?: string;
@@ -444,6 +484,9 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     const value = event.target.value;
     const cursorPos = event.target.selectionStart ?? value.length;
     setText(value);
+    if (lastPromptOptimization && value !== lastPromptOptimization.optimizedText) {
+      setLastPromptOptimization(null);
+    }
     if (!detectSlashTrigger(value, cursorPos)) {
       detectAtTrigger(value, cursorPos);
     }
@@ -493,6 +536,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     setText('');
     setAttachments([]);
     setFileReferences([]);
+    setLastPromptOptimization(null);
     draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
   };
 
@@ -591,6 +635,19 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === 'z' &&
+      lastPromptOptimization &&
+      text === lastPromptOptimization.optimizedText
+    ) {
+      event.preventDefault();
+      undoPromptOptimization();
+      return;
+    }
+
     if (showFileSearch) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -812,6 +869,19 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     });
   };
 
+  const undoPromptOptimization = () => {
+    const snapshot = lastPromptOptimization;
+    if (!snapshot) return;
+
+    setText(snapshot.originalText);
+    setLastPromptOptimization(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    });
+    addToast({ type: 'info', message: t('chat.optimizePromptUndone') });
+  };
+
   const optimizeComposerPrompt = async () => {
     if (isOptimizingPrompt) return;
 
@@ -829,61 +899,75 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     const targetText = selectedText || sourceText;
 
     setIsOptimizingPrompt(true);
+    setShowPromptOptimizeMenu(false);
     const optimizationContext = {
+      mode: promptOptimizeMode,
       projectName: activeSession?.projectName,
       projectPath: activeSession?.projectPath,
       hasFileReferences: fileReferences.length > 0,
       hasImages: attachments.length > 0,
+      fileReferences: buildPromptFileReferences(fileReferences),
+      imageReferences: buildPromptImageReferences(attachments),
+      sessionContext: buildPromptSessionContext(activeSession, messages),
     };
-    let optimized = '';
-    let optimizedByModel = false;
 
     try {
+      const workspaceContext = await collectPromptWorkspaceContext(sessionId);
       const result = await piApi.optimizePrompt({
         text: targetText,
         ...optimizationContext,
+        workspaceContext,
         language: detectPromptLanguage(targetText),
         selectionOnly: hasSelection,
         sessionId,
         currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
       });
-      optimized = result.optimized.trim();
-      optimizedByModel = result.source === 'model';
-    } catch (err) {
-      console.warn('[ChatInput] Fast prompt optimizer unavailable, using local fallback:', err);
-      optimized = optimizePromptDraft(targetText, optimizationContext);
-    }
+      const optimized = result.optimized.trim();
+      if (!optimized) throw new Error(result.warning || t('chat.optimizePromptEmptyResult'));
 
-    if (!optimized) {
-      optimized = optimizePromptDraft(targetText, optimizationContext);
-    }
+      let nextText = optimized;
+      let nextSelectionStart = optimized.length;
+      let nextSelectionEnd = optimized.length;
+      if (hasSelection && selectedText) {
+        const before = text.slice(0, selectionStart);
+        const after = text.slice(selectionEnd);
+        nextText = `${before}${optimized}${after}`;
+        nextSelectionStart = before.length;
+        nextSelectionEnd = before.length + optimized.length;
+      }
 
-    if (hasSelection && selectedText) {
-      const before = text.slice(0, selectionStart);
-      const after = text.slice(selectionEnd);
-      const nextText = `${before}${optimized}${after}`;
+      setLastPromptOptimization({
+        originalText: text,
+        optimizedText: nextText,
+        selectionStart,
+        selectionEnd,
+      });
       setText(nextText);
       requestAnimationFrame(() => {
         textareaRef.current?.focus();
-        textareaRef.current?.setSelectionRange(before.length, before.length + optimized.length);
+        textareaRef.current?.setSelectionRange(nextSelectionStart, nextSelectionEnd);
       });
-    } else {
-      setText(optimized);
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-        textareaRef.current?.setSelectionRange(optimized.length, optimized.length);
-      });
-    }
 
-    closeFileSearch();
-    setShowSlashMenu(false);
-    addToast({
-      type: 'success',
-      message: optimizedByModel
+      closeFileSearch();
+      setShowSlashMenu(false);
+      const promptOptimizedMessage = result.source === 'model'
         ? t('chat.optimizePromptModelDone')
-        : (hasSelection ? t('chat.optimizePromptSelectionDone') : t('chat.optimizePromptDone')),
-    });
-    setIsOptimizingPrompt(false);
+        : t('chat.optimizePromptLocalDone');
+      addToast({
+        type: 'success',
+        message: promptOptimizedMessage || (hasSelection ? t('chat.optimizePromptSelectionDone') : t('chat.optimizePromptDone')),
+        duration: result.warning ? 6000 : undefined,
+      });
+    } catch (err) {
+      console.warn('[ChatInput] Prompt optimizer unavailable:', err);
+      addToast({
+        type: 'error',
+        message: t('chat.optimizePromptFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    } finally {
+      setIsOptimizingPrompt(false);
+    }
   };
 
   const launchAgentRoom = async () => {
@@ -1064,19 +1148,76 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
           <AtSign size={16} />
         </button>
 
-        <button
-          onClick={optimizeComposerPrompt}
-          disabled={!text.trim() || isOptimizingPrompt || isPreparingPrompt}
-          className={cn(
-            'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border transition-colors',
-            text.trim() && !isOptimizingPrompt && !isPreparingPrompt
-              ? 'border-pi-accent/25 bg-pi-accent/10 text-pi-accent hover:bg-pi-accent/15'
-              : 'cursor-not-allowed border-transparent text-pi-dim opacity-60'
+        <div ref={promptOptimizeMenuRef} className="relative flex flex-shrink-0">
+          <button
+            onClick={optimizeComposerPrompt}
+            disabled={!text.trim() || isOptimizingPrompt || isPreparingPrompt}
+            className={cn(
+              'flex h-10 w-10 items-center justify-center rounded-l-xl border border-r-0 transition-colors',
+              text.trim() && !isOptimizingPrompt && !isPreparingPrompt
+                ? 'border-pi-accent/25 bg-pi-accent/10 text-pi-accent hover:bg-pi-accent/15'
+                : 'cursor-not-allowed border-transparent text-pi-dim opacity-60'
+            )}
+            title={`${t('chat.optimizePrompt')} · ${promptOptimizeModeLabel(promptOptimizeMode, t)}`}
+          >
+            {isOptimizingPrompt ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
+          </button>
+          <button
+            onClick={() => setShowPromptOptimizeMenu((open) => !open)}
+            disabled={isOptimizingPrompt || isPreparingPrompt}
+            className={cn(
+              'flex h-10 w-7 items-center justify-center rounded-r-xl border transition-colors',
+              promptOptimizeMode !== 'auto' || showPromptOptimizeMenu
+                ? 'border-pi-accent/25 bg-pi-accent/10 text-pi-accent hover:bg-pi-accent/15'
+                : 'border-pi-accent/20 bg-pi-accent/5 text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text',
+              (isOptimizingPrompt || isPreparingPrompt) && 'cursor-not-allowed opacity-60'
+            )}
+            title={t('chat.optimizePromptModeMenu')}
+          >
+            <ChevronDown size={13} />
+          </button>
+
+          {showPromptOptimizeMenu && (
+            <div className="pi-glass-menu absolute bottom-full left-0 z-[95] mb-2 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-lg">
+              <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">
+                {t('chat.optimizePromptModeMenu')}
+              </div>
+              <div className="max-h-[340px] overflow-y-auto py-1">
+                {PROMPT_OPTIMIZE_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => {
+                      setPromptOptimizeMode(mode);
+                      setShowPromptOptimizeMenu(false);
+                    }}
+                    className={cn(
+                      'flex w-full items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-pi-bg-hover',
+                      promptOptimizeMode === mode ? 'bg-pi-selected-bg text-pi-text' : 'text-pi-muted'
+                    )}
+                  >
+                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-pi-border/70 text-pi-accent">
+                      {promptOptimizeMode === mode ? <Check size={10} /> : null}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-pi-text">{promptOptimizeModeLabel(mode, t)}</span>
+                      <span className="block text-[10px] leading-relaxed text-pi-dim">{promptOptimizeModeDescription(mode, t)}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
-          title={t('chat.optimizePrompt')}
-        >
-          {isOptimizingPrompt ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
-        </button>
+        </div>
+
+        {lastPromptOptimization && text === lastPromptOptimization.optimizedText && (
+          <button
+            onClick={undoPromptOptimization}
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-transparent text-pi-dim transition-colors hover:border-pi-accent/25 hover:bg-pi-bg-hover hover:text-pi-text"
+            title={t('chat.optimizePromptUndo')}
+          >
+            <Undo2 size={15} />
+          </button>
+        )}
 
         <button
           onClick={() => void launchAgentRoom()}
@@ -1680,150 +1821,95 @@ function formatBytes(value: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-interface PromptOptimizationContext {
-  projectName?: string;
-  projectPath?: string;
-  hasFileReferences: boolean;
-  hasImages: boolean;
-}
-
-function optimizePromptDraft(input: string, context: PromptOptimizationContext): string {
-  const task = normalizePromptInput(input);
-  const language = detectPromptLanguage(task);
-  const role = inferPromptRole(task, language);
-  const contextLines = buildPromptContextLines(context, language);
-  const requirements = buildPromptRequirements(task, language);
-  const outputFormat = buildPromptOutputFormat(task, language);
-
-  if (language === 'zh') {
-    return [
-      `请你作为${role}，帮助我完成下面的任务。`,
-      '',
-      '## 目标',
-      task,
-      '',
-      '## 上下文',
-      ...contextLines,
-      '',
-      '## 要求',
-      ...requirements.map((item, index) => `${index + 1}. ${item}`),
-      '',
-      '## 输出格式',
-      ...outputFormat.map((item) => `- ${item}`),
-    ].join('\n');
-  }
-
-  return [
-    `Act as ${role} and help me complete the task below.`,
-    '',
-    '## Goal',
-    task,
-    '',
-    '## Context',
-    ...contextLines,
-    '',
-    '## Requirements',
-    ...requirements.map((item, index) => `${index + 1}. ${item}`),
-    '',
-    '## Output Format',
-    ...outputFormat.map((item) => `- ${item}`),
-  ].join('\n');
-}
-
-function normalizePromptInput(input: string): string {
-  return input
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function detectPromptLanguage(input: string): 'zh' | 'en' {
+function detectPromptLanguage(input: string): 'zh' | 'en' | 'ja' {
+  if (/[\u3040-\u30ff]/.test(input)) return 'ja';
   return /[\u3400-\u9fff]/.test(input) ? 'zh' : 'en';
 }
 
-function inferPromptRole(input: string, language: 'zh' | 'en'): string {
-  const lower = input.toLowerCase();
-  const codeTask = /(代码|实现|修复|调试|报错|bug|测试|前端|后端|接口|仓库|项目|重构|code|implement|fix|debug|bug|test|frontend|backend|api|repo|refactor)/i.test(input);
-  const writingTask = /(文档|报告|总结|翻译|润色|readme|doc|report|summary|translate|rewrite|polish)/i.test(input);
-  const dataTask = /(数据|表格|csv|分析|统计|可视化|data|csv|analysis|chart|visuali[sz]e|statistics)/i.test(input);
-  const productTask = /(产品|交互|ui|ux|界面|设计|体验|product|design|interface)/i.test(input);
-
-  if (codeTask) return language === 'zh' ? '资深软件工程师' : 'a senior software engineer';
-  if (dataTask) return language === 'zh' ? '严谨的数据分析专家' : 'a rigorous data analyst';
-  if (productTask || lower.includes('ui')) return language === 'zh' ? '资深产品与交互设计专家' : 'a senior product and UX designer';
-  if (writingTask) return language === 'zh' ? '专业技术写作专家' : 'a technical writing expert';
-  return language === 'zh' ? '专业问题分析与执行专家' : 'an expert problem solver';
+function promptOptimizeModeLabel(
+  mode: PromptOptimizeMode,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  return t(`chat.optimizePromptMode.${mode}.label` as TranslationKey);
 }
 
-function buildPromptContextLines(context: PromptOptimizationContext, language: 'zh' | 'en'): string[] {
-  if (language === 'zh') {
-    const lines = [
-      context.projectName ? `- 当前项目：${context.projectName}` : '- 当前项目：以当前工作区为准',
-      context.projectPath ? `- 工作目录：${context.projectPath}` : '- 工作目录：以当前会话工作区为准',
-    ];
-    if (context.hasFileReferences) lines.push('- 我已附加工作区文件作为上下文，请优先结合文件内容判断。');
-    if (context.hasImages) lines.push('- 我已附加图片作为上下文，请结合图片信息判断。');
-    return lines;
-  }
-
-  const lines = [
-    context.projectName ? `- Current project: ${context.projectName}` : '- Current project: use the active workspace',
-    context.projectPath ? `- Working directory: ${context.projectPath}` : '- Working directory: use the active session workspace',
-  ];
-  if (context.hasFileReferences) lines.push('- Workspace files are attached as context; prioritize their contents.');
-  if (context.hasImages) lines.push('- Images are attached as context; use their visual information when relevant.');
-  return lines;
+function promptOptimizeModeDescription(
+  mode: PromptOptimizeMode,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  return t(`chat.optimizePromptMode.${mode}.description` as TranslationKey);
 }
 
-function buildPromptRequirements(input: string, language: 'zh' | 'en'): string[] {
-  const codeTask = /(代码|实现|修复|调试|报错|bug|测试|前端|后端|接口|仓库|项目|重构|code|implement|fix|debug|bug|test|frontend|backend|api|repo|refactor)/i.test(input);
-  const compareTask = /(比较|对比|差距|评估|compare|contrast|gap|evaluate|review)/i.test(input);
-
-  if (language === 'zh') {
-    const requirements = [
-      '先明确任务目标、关键约束和必要假设；不确定时说明你的判断依据。',
-      '给出可执行的步骤，优先处理最能推进目标的部分。',
-      '保持答案简洁但完整，避免泛泛而谈。',
-    ];
-    if (codeTask) {
-      requirements.push('如果需要改代码，请先阅读相关文件，再做最小必要改动，并保持现有架构和风格一致。');
-      requirements.push('完成后给出验证方式、测试结果和仍需注意的风险。');
-    }
-    if (compareTask) {
-      requirements.push('对比时请列出维度、现状、差距、优先级和下一步建议。');
-    }
-    return requirements;
-  }
-
-  const requirements = [
-    'Clarify the goal, constraints, and necessary assumptions before acting.',
-    'Provide actionable steps and prioritize the work that moves the goal forward fastest.',
-    'Keep the answer concise but complete; avoid generic advice.',
-  ];
-  if (codeTask) {
-    requirements.push('If code changes are needed, inspect the relevant files first, make the smallest useful change, and follow existing architecture and style.');
-    requirements.push('Finish with verification steps, test results, and remaining risks.');
-  }
-  if (compareTask) {
-    requirements.push('For comparisons, include dimensions, current state, gaps, priorities, and recommended next steps.');
-  }
-  return requirements;
+function buildPromptFileReferences(references: WorkspaceFileReference[]): PromptOptimizeFileReference[] | undefined {
+  if (references.length === 0) return undefined;
+  return references.slice(0, 12).map((reference) => ({
+    path: reference.path,
+    name: reference.name,
+    lineStart: reference.lineStart,
+    lineEnd: reference.lineEnd,
+    excerpt: reference.excerpt ? truncateInline(reference.excerpt, 1600) : undefined,
+  }));
 }
 
-function buildPromptOutputFormat(input: string, language: 'zh' | 'en'): string[] {
-  const codeTask = /(代码|实现|修复|调试|bug|测试|code|implement|fix|debug|bug|test)/i.test(input);
-  const compareTask = /(比较|对比|差距|评估|compare|contrast|gap|evaluate|review)/i.test(input);
+function buildPromptImageReferences(attachments: ImageAttachment[]): PromptOptimizeImageReference[] | undefined {
+  if (attachments.length === 0) return undefined;
+  return attachments.slice(0, 6).map((attachment, index) => ({
+    fileName: attachment.fileName ?? `image-${index + 1}`,
+    mimeType: attachment.mimeType,
+  }));
+}
 
-  if (language === 'zh') {
-    if (compareTask) return ['结论摘要', '详细对比表', '优先级排序', '下一步行动'];
-    if (codeTask) return ['改动摘要', '涉及文件', '验证结果', '后续建议'];
-    return ['关键结论', '具体步骤', '注意事项'];
+function buildPromptSessionContext(
+  activeSession: Session | undefined,
+  messages: ChatMessage[]
+): PromptOptimizeSessionContext | undefined {
+  const recent = [...messages].reverse();
+  const lastUserMessage = recent.find((message) => message.role === 'user');
+  const lastAssistantMessage = recent.find((message) => message.role === 'assistant');
+  const context: PromptOptimizeSessionContext = {
+    title: activeSession?.title,
+    lastUserMessage: lastUserMessage ? truncateInline(messagePlainText(lastUserMessage), 900) : undefined,
+    lastAssistantSummary: lastAssistantMessage ? truncateInline(messagePlainText(lastAssistantMessage), 900) : undefined,
+  };
+  return context.title || context.lastUserMessage || context.lastAssistantSummary ? context : undefined;
+}
+
+async function collectPromptWorkspaceContext(sessionId: string): Promise<PromptOptimizeWorkspaceContext | undefined> {
+  try {
+    const status = await piApi.getWorkspaceStatus(sessionId);
+    if (status.state !== 'ok' && status.state !== 'not_git_repo') return undefined;
+    const changedFiles = status.changedFiles.slice(0, 30).map((file) => ({
+      path: file.path,
+      status: [
+        file.staged ? 'staged' : '',
+        file.unstaged ? 'unstaged' : '',
+        file.status,
+      ].filter(Boolean).join(' '),
+    }));
+    return {
+      branch: status.branch ?? undefined,
+      dirty: Boolean(status.hasStagedChanges || status.hasUnstagedChanges || changedFiles.length > 0),
+      changedFiles: changedFiles.length > 0 ? changedFiles : undefined,
+    };
+  } catch {
+    return undefined;
   }
+}
 
-  if (compareTask) return ['Executive summary', 'Detailed comparison table', 'Prioritized gaps', 'Next actions'];
-  if (codeTask) return ['Change summary', 'Files touched', 'Verification results', 'Follow-up suggestions'];
-  return ['Key conclusion', 'Concrete steps', 'Important caveats'];
+function messagePlainText(message: ChatMessage): string {
+  const parts = message.content.map((part) => {
+    if (part.type === 'text') return part.text ?? '';
+    if (part.type === 'thinking') return part.thinking?.content ?? '';
+    if (part.type === 'tool_result') return part.toolResult?.content ?? '';
+    if (part.type === 'image') return `[image:${part.image?.fileName ?? part.image?.mimeType ?? 'attached'}]`;
+    if (part.type === 'tool_use') return `[tool:${part.toolUse?.name ?? 'unknown'}]`;
+    return '';
+  });
+  return parts.join('\n').trim();
+}
+
+function truncateInline(value: string, maxLength: number): string {
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }

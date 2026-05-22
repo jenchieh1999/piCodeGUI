@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { getSession } from './mock-agent.js';
@@ -108,6 +108,13 @@ export interface WorkspaceMoveFileResult {
   error?: string;
 }
 
+export interface WorkspaceCopyFileResult {
+  state: 'ok' | 'missing' | 'error';
+  sourcePath: string;
+  targetPath: string;
+  error?: string;
+}
+
 export interface WorkspaceDiffResult {
   state: 'ok' | 'missing' | 'not_git_repo' | 'error';
   path: string;
@@ -149,7 +156,7 @@ const IGNORED_FS_ERROR_CODES = new Set(['EACCES', 'EPERM', 'EBUSY', 'ENOENT', 'E
 
 export async function handleWorkspaceRequest(rawUrl: string, method: string, req?: NodeJS.ReadableStream): Promise<WorkspaceHttpResponse | null> {
   const url = new URL(rawUrl, 'http://127.0.0.1');
-  const match = /^\/api\/sessions\/([^/]+)\/workspace\/(status|tree|file|diff|search|change|move|git)$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([^/]+)\/workspace\/(status|tree|file|diff|search|change|move|copy|git)$/.exec(url.pathname);
   if (!match) return null;
 
   const sessionId = decodeURIComponent(match[1]!);
@@ -192,6 +199,21 @@ export async function handleWorkspaceRequest(rawUrl: string, method: string, req
         });
       }
       return json(200, moveWorkspacePath(sessionId, sourcePath, targetDirectory));
+    }
+
+    if (method === 'POST' && resource === 'copy') {
+      const body = await readJsonBody(req);
+      const sourcePath = typeof body?.sourcePath === 'string' ? body.sourcePath : '';
+      const targetDirectory = typeof body?.targetDirectory === 'string' ? body.targetDirectory : '';
+      if (!sourcePath) {
+        return json(400, {
+          state: 'error',
+          sourcePath: normalizeWorkspacePath(sourcePath),
+          targetPath: '',
+          error: 'Expected JSON body with a sourcePath field.',
+        });
+      }
+      return json(200, copyWorkspacePath(sessionId, sourcePath, targetDirectory));
     }
 
     if (method === 'POST' && resource === 'change') {
@@ -622,6 +644,65 @@ export function moveWorkspacePath(sessionId: string, sourcePath: string, targetD
   }
 }
 
+export function copyWorkspacePath(sessionId: string, sourcePath: string, targetDirectory: string): WorkspaceCopyFileResult {
+  const workspace = resolveWorkspace(sessionId);
+  const normalizedSource = normalizeWorkspacePath(sourcePath);
+  const normalizedTargetDirectory = normalizeWorkspacePath(targetDirectory);
+  const sourceName = path.posix.basename(normalizedSource);
+
+  if (!workspace.ok) {
+    return {
+      state: 'missing',
+      sourcePath: normalizedSource,
+      targetPath: joinWorkspacePath(normalizedTargetDirectory, sourceName),
+      error: workspace.error,
+    };
+  }
+
+  try {
+    assertWorkspaceFilePath(normalizedSource);
+    const sourceAbsolute = resolveInsideWorkspace(workspace.workDir, normalizedSource);
+    const targetDirectoryAbsolute = resolveInsideWorkspace(workspace.workDir, normalizedTargetDirectory);
+
+    if (!existsSync(sourceAbsolute)) {
+      return {
+        state: 'missing',
+        sourcePath: normalizedSource,
+        targetPath: joinWorkspacePath(normalizedTargetDirectory, sourceName),
+        error: `Source path does not exist: ${normalizedSource}`,
+      };
+    }
+    if (!existsSync(targetDirectoryAbsolute) || !statSync(targetDirectoryAbsolute).isDirectory()) {
+      return {
+        state: 'missing',
+        sourcePath: normalizedSource,
+        targetPath: joinWorkspacePath(normalizedTargetDirectory, sourceName),
+        error: `Target folder does not exist: ${normalizedTargetDirectory || '.'}`,
+      };
+    }
+    if (statSync(sourceAbsolute).isDirectory() && isPathInside(targetDirectoryAbsolute, sourceAbsolute)) {
+      return {
+        state: 'error',
+        sourcePath: normalizedSource,
+        targetPath: joinWorkspacePath(normalizedTargetDirectory, sourceName),
+        error: 'Cannot copy a folder into itself.',
+      };
+    }
+
+    const targetPath = resolveAvailableCopyPath(workspace.workDir, normalizedTargetDirectory, sourceName);
+    const targetAbsolute = resolveInsideWorkspace(workspace.workDir, targetPath);
+    cpSync(sourceAbsolute, targetAbsolute, { recursive: true, errorOnExist: true, force: false });
+    return { state: 'ok', sourcePath: normalizedSource, targetPath };
+  } catch (err) {
+    return {
+      state: 'error',
+      sourcePath: normalizedSource,
+      targetPath: joinWorkspacePath(normalizedTargetDirectory, sourceName),
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export function getWorkspaceDiff(sessionId: string, workspacePath: string): WorkspaceDiffResult {
   const workspace = resolveWorkspace(sessionId);
   const normalized = normalizeWorkspacePath(workspacePath);
@@ -841,6 +922,23 @@ function removeWorkspacePath(root: string, workspacePath: string): void {
 function isPathInside(child: string, parent: string): boolean {
   const relative = path.relative(parent, child);
   return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function resolveAvailableCopyPath(root: string, targetDirectory: string, sourceName: string): string {
+  const firstPath = joinWorkspacePath(targetDirectory, sourceName);
+  if (!existsSync(resolveInsideWorkspace(root, firstPath))) return firstPath;
+
+  const parsed = path.posix.parse(sourceName);
+  const stem = parsed.name || parsed.base;
+  const ext = parsed.name ? parsed.ext : '';
+  for (let index = 1; index < 1000; index += 1) {
+    const suffix = index === 1 ? ' copy' : ` copy ${index}`;
+    const candidateName = `${stem}${suffix}${ext}`;
+    const candidatePath = joinWorkspacePath(targetDirectory, candidateName);
+    if (!existsSync(resolveInsideWorkspace(root, candidatePath))) return candidatePath;
+  }
+
+  throw new Error(`Unable to find an available copy name for ${sourceName}.`);
 }
 
 function readNumstat(workDir: string): Map<string, { additions: number; deletions: number }> {

@@ -909,6 +909,13 @@ export interface WorkspaceMoveFileResult {
   error?: string;
 }
 
+export interface WorkspaceCopyFileResult {
+  state: 'ok' | 'missing' | 'error';
+  sourcePath: string;
+  targetPath: string;
+  error?: string;
+}
+
 export interface WorkspaceTreeEntry {
   name: string;
   path: string;
@@ -958,13 +965,47 @@ export interface WorkspaceSearchResult {
   error?: string;
 }
 
+export type PromptOptimizeMode = 'auto' | 'polish' | 'execute' | 'debug' | 'review' | 'research' | 'ui' | 'agent_room';
+
+export interface PromptOptimizeFileReference {
+  path: string;
+  name?: string;
+  language?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  excerpt?: string;
+}
+
+export interface PromptOptimizeImageReference {
+  fileName?: string;
+  mimeType?: string;
+  note?: string;
+}
+
+export interface PromptOptimizeSessionContext {
+  title?: string;
+  lastUserMessage?: string;
+  lastAssistantSummary?: string;
+}
+
+export interface PromptOptimizeWorkspaceContext {
+  branch?: string;
+  dirty?: boolean;
+  changedFiles?: Array<{ path: string; status: string }>;
+}
+
 export interface PromptOptimizeInput {
   text: string;
+  mode?: PromptOptimizeMode;
   projectName?: string;
   projectPath?: string;
   language?: 'zh' | 'en' | 'ja';
   hasFileReferences?: boolean;
   hasImages?: boolean;
+  fileReferences?: PromptOptimizeFileReference[];
+  imageReferences?: PromptOptimizeImageReference[];
+  sessionContext?: PromptOptimizeSessionContext;
+  workspaceContext?: PromptOptimizeWorkspaceContext;
   selectionOnly?: boolean;
   sessionId?: string;
   currentModel?: {
@@ -980,6 +1021,11 @@ export interface PromptOptimizeResult {
   provider?: string;
   modelId?: string;
   warning?: string;
+  mode?: PromptOptimizeMode;
+  qualityScore?: number;
+  changedIntentRisk?: 'low' | 'medium' | 'high';
+  warnings?: string[];
+  fallbackReason?: string;
 }
 
 // ---- WebSocket Protocol ----

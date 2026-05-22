@@ -17,19 +17,6 @@ import {
   indentWithTab,
   toggleComment,
 } from '@codemirror/commands';
-import { css } from '@codemirror/lang-css';
-import { cpp } from '@codemirror/lang-cpp';
-import { html } from '@codemirror/lang-html';
-import { java } from '@codemirror/lang-java';
-import { javascript } from '@codemirror/lang-javascript';
-import { json } from '@codemirror/lang-json';
-import { markdown } from '@codemirror/lang-markdown';
-import { php } from '@codemirror/lang-php';
-import { python } from '@codemirror/lang-python';
-import { rust } from '@codemirror/lang-rust';
-import { sql } from '@codemirror/lang-sql';
-import { xml } from '@codemirror/lang-xml';
-import { yaml } from '@codemirror/lang-yaml';
 import {
   bracketMatching,
   defaultHighlightStyle,
@@ -40,7 +27,6 @@ import {
   StreamLanguage,
   syntaxHighlighting,
 } from '@codemirror/language';
-import { lua } from '@codemirror/legacy-modes/mode/lua';
 import { Compartment, EditorState, type Extension } from '@codemirror/state';
 import { tags } from '@lezer/highlight';
 import {
@@ -637,7 +623,7 @@ function CodeSourceEditor({
           syntaxHighlighting(codeEditorHighlightStyle),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           codeEditorTheme,
-          languageCompartmentRef.current.of(languageExtensionFor(language)),
+          languageCompartmentRef.current.of([]),
           wrapCompartmentRef.current.of(wrapLines ? EditorView.lineWrapping : []),
           keymap.of([
             indentWithTab,
@@ -698,9 +684,18 @@ function CodeSourceEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    view.dispatch({
-      effects: languageCompartmentRef.current.reconfigure(languageExtensionFor(language)),
+    let disposed = false;
+
+    void loadLanguageExtension(language).then((extension) => {
+      if (disposed || viewRef.current !== view) return;
+      view.dispatch({
+        effects: languageCompartmentRef.current.reconfigure(extension),
+      });
     });
+
+    return () => {
+      disposed = true;
+    };
   }, [language]);
 
   useEffect(() => {
@@ -810,56 +805,56 @@ const codeEditorHighlightStyle = HighlightStyle.define([
   { tag: tags.invalid, color: 'var(--pi-error)' },
 ]);
 
-function languageExtensionFor(language: string): Extension {
+async function loadLanguageExtension(language: string): Promise<Extension> {
   switch (language.toLowerCase()) {
     case 'typescript':
     case 'ts':
-      return javascript({ typescript: true });
+      return import('@codemirror/lang-javascript').then(({ javascript }) => javascript({ typescript: true }));
     case 'tsx':
-      return javascript({ typescript: true, jsx: true });
+      return import('@codemirror/lang-javascript').then(({ javascript }) => javascript({ typescript: true, jsx: true }));
     case 'javascript':
     case 'js':
     case 'mjs':
     case 'cjs':
-      return javascript();
+      return import('@codemirror/lang-javascript').then(({ javascript }) => javascript());
     case 'jsx':
-      return javascript({ jsx: true });
+      return import('@codemirror/lang-javascript').then(({ javascript }) => javascript({ jsx: true }));
     case 'json':
     case 'jsonc':
-      return json();
+      return import('@codemirror/lang-json').then(({ json }) => json());
     case 'html':
-      return html();
+      return import('@codemirror/lang-html').then(({ html }) => html());
     case 'css':
-      return css();
+      return import('@codemirror/lang-css').then(({ css }) => css());
     case 'markdown':
     case 'md':
     case 'mdx':
-      return markdown();
+      return import('@codemirror/lang-markdown').then(({ markdown }) => markdown());
     case 'python':
     case 'py':
-      return python();
+      return import('@codemirror/lang-python').then(({ python }) => python());
     case 'sql':
-      return sql();
+      return import('@codemirror/lang-sql').then(({ sql }) => sql());
     case 'xml':
-      return xml();
+      return import('@codemirror/lang-xml').then(({ xml }) => xml());
     case 'yaml':
     case 'yml':
-      return yaml();
+      return import('@codemirror/lang-yaml').then(({ yaml }) => yaml());
     case 'java':
-      return java();
+      return import('@codemirror/lang-java').then(({ java }) => java());
     case 'c':
     case 'cpp':
     case 'c++':
     case 'hpp':
     case 'h':
-      return cpp();
+      return import('@codemirror/lang-cpp').then(({ cpp }) => cpp());
     case 'php':
-      return php();
+      return import('@codemirror/lang-php').then(({ php }) => php());
     case 'rust':
     case 'rs':
-      return rust();
+      return import('@codemirror/lang-rust').then(({ rust }) => rust());
     case 'lua':
-      return StreamLanguage.define(lua);
+      return import('@codemirror/legacy-modes/mode/lua').then(({ lua }) => StreamLanguage.define(lua));
     default:
       return [];
   }
