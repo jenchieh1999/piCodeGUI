@@ -18,6 +18,7 @@ class AutoAgentRuntime implements AgentRuntime {
   readonly kind = 'auto';
 
   private useFallback = false;
+  private recoveryNotice: string | null = null;
 
   constructor(
     private readonly primary: AgentRuntime,
@@ -28,6 +29,14 @@ class AutoAgentRuntime implements AgentRuntime {
     if (this.useFallback) {
       await this.fallback.prompt(input, callbacks, signal);
       return;
+    }
+
+    if (this.recoveryNotice) {
+      callbacks.sendMessage({
+        type: 'runtime_updated',
+        runtimeInfo: this.getInfo(this.recoveryNotice),
+      });
+      this.recoveryNotice = null;
     }
 
     let emittedRenderableOutput = false;
@@ -73,6 +82,10 @@ class AutoAgentRuntime implements AgentRuntime {
 
   async setModel(provider: string, modelId: string): Promise<void> {
     await this.primary.setModel?.(provider, modelId);
+    if (this.useFallback) {
+      this.useFallback = false;
+      this.recoveryNotice = `Pi SDK runtime recovered after selecting ${provider}/${modelId}.`;
+    }
     await this.fallback.setModel?.(provider, modelId);
   }
 

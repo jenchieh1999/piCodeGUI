@@ -4,7 +4,9 @@ import {
   ArrowLeft,
   Bot,
   CheckCircle2,
+  Copy,
   FileText,
+  FolderOpen,
   FlaskConical,
   Loader2,
   MessageSquarePlus,
@@ -25,15 +27,21 @@ import { piApi } from '../../api/client';
 import { useI18n } from '../../lib/i18n';
 import { useAgentRoomStore } from '../../stores/agentRoomStore';
 import { useChatStore } from '../../stores/chatStore';
+import { useModelStore } from '../../stores/modelStore';
 import { useUIStore } from '../../stores/uiStore';
 import type {
   AgentRoom,
   AgentRoomArtifact,
   AgentRoomCreateInput,
+  AgentRoomCitation,
+  AgentRoomInterventionAction,
   AgentRoomMessage,
   AgentRoomRun,
   AgentRoomTask,
+  ModelInfo,
+  ModelRef,
 } from '../../types';
+import { MarkdownRenderer } from '../markdown/MarkdownRenderer';
 import { cn } from '../shared/utils';
 
 const EMPTY_MESSAGES: AgentRoomMessage[] = [];
@@ -41,12 +49,21 @@ const EMPTY_ARTIFACTS: AgentRoomArtifact[] = [];
 const EMPTY_TASKS: AgentRoomTask[] = [];
 const EMPTY_RUNS: AgentRoomRun[] = [];
 
+type AgentRoomArtifactFilter = 'all' | 'final' | 'evidence' | 'claims' | 'risks';
+type AgentRoomInterventionDraft =
+  | { action: 'add_note'; title: string; placeholder: string }
+  | { action: 'add_evidence'; group: 'left' | 'right'; title: string; placeholder: string }
+  | { action: 'rerun_final'; title: string; placeholder: string };
+
 export function AgentsRoomView() {
   const { t } = useI18n();
   const setActiveView = useUIStore((s) => s.setActiveView);
   const addToast = useUIStore((s) => s.addToast);
+  const requestWorkspaceOpen = useUIStore((s) => s.requestWorkspaceOpen);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === activeSessionId));
+  const availableModels = useModelStore((s) => s.availableModels);
+  const currentModel = useModelStore((s) => s.currentModel);
   const rooms = useAgentRoomStore((s) => s.rooms);
   const activeRoomId = useAgentRoomStore((s) => s.activeRoomId);
   const setSnapshot = useAgentRoomStore((s) => s.setSnapshot);
@@ -59,6 +76,7 @@ export function AgentsRoomView() {
   const tasksByRoom = useAgentRoomStore((s) => s.tasksByRoom);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [editingRoom, setEditingRoom] = useState<AgentRoom | null>(null);
+  const [interventionDraft, setInterventionDraft] = useState<AgentRoomInterventionDraft | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -91,6 +109,9 @@ export function AgentsRoomView() {
   const artifacts = activeRoom ? artifactsByRoom[activeRoom.id] ?? EMPTY_ARTIFACTS : EMPTY_ARTIFACTS;
   const tasks = activeRoom ? tasksByRoom[activeRoom.id] ?? EMPTY_TASKS : EMPTY_TASKS;
   const finalReport = artifacts.find((artifact) => artifact.type === 'final_report') ?? null;
+  const activeModel = activeSession?.modelId
+    ? availableModels.find((model) => model.id === activeSession.modelId && (!activeSession.modelProvider || model.provider === activeSession.modelProvider)) ?? currentModel
+    : currentModel;
 
   const startRun = async (room: AgentRoom) => {
     try {
@@ -135,9 +156,9 @@ export function AgentsRoomView() {
     }
   };
 
-  const updateRoomLabels = async (
+  const updateRoom = async (
     room: AgentRoom,
-    input: Pick<AgentRoomCreateInput, 'title' | 'leftLabel' | 'rightLabel' | 'neutralLabel'>,
+    input: Pick<AgentRoomCreateInput, 'title' | 'leftLabel' | 'rightLabel' | 'neutralLabel' | 'quickModel' | 'deepModel'>,
   ) => {
     try {
       const result = await piApi.updateAgentRoom(room.id, input);
@@ -152,6 +173,31 @@ export function AgentsRoomView() {
     }
   };
 
+  const submitIntervention = async (draft: AgentRoomInterventionDraft, text: string) => {
+    if (!activeRoom || !latestRun) {
+      addToast({ type: 'warning', message: t('agentsRoom.noRunForIntervention') });
+      return;
+    }
+
+    try {
+      const input = draft.action === 'add_note'
+        ? { action: 'add_note' as AgentRoomInterventionAction, note: text }
+        : draft.action === 'add_evidence'
+          ? { action: 'add_evidence' as AgentRoomInterventionAction, group: draft.group, instruction: text }
+          : { action: 'rerun_final' as AgentRoomInterventionAction, instruction: text };
+      const result = await piApi.createAgentRoomIntervention(activeRoom.id, input);
+      useAgentRoomStore.getState().setSnapshot(result.snapshot);
+      setInterventionDraft(null);
+      addToast({ type: 'success', message: t('agentsRoom.interventionDone') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('agentsRoom.interventionFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
   const insertFinalToChat = () => {
     if (!finalReport || !activeSessionId) {
       addToast({ type: 'warning', message: t('agentsRoom.noFinalReport') });
@@ -159,6 +205,27 @@ export function AgentsRoomView() {
     }
     window.dispatchEvent(new CustomEvent('pi:add-workspace-reference', { detail: { sessionId: activeSessionId } }));
     useChatStore.getState().addUserMessage(activeSessionId, finalReport.content);
+    setActiveView('chat');
+  };
+
+  const insertArtifactToChat = (artifact: AgentRoomArtifact) => {
+    if (!activeSessionId) {
+      addToast({ type: 'warning', message: t('agentsRoom.noActiveChat') });
+      return;
+    }
+    useChatStore.getState().addUserMessage(activeSessionId, `# ${artifact.title}\n\n${artifact.content}`);
+    addToast({ type: 'success', message: t('agentsRoom.artifactInserted') });
+    setActiveView('chat');
+  };
+
+  const openWorkspaceSource = (artifact: AgentRoomArtifact) => {
+    const citation = workspaceCitationForArtifact(artifact);
+    const sessionId = activeRoom?.sessionId ?? activeSessionId;
+    if (!citation || !sessionId) {
+      addToast({ type: 'warning', message: t('agentsRoom.noWorkspaceSource') });
+      return;
+    }
+    requestWorkspaceOpen(sessionId, citation.source);
     setActiveView('chat');
   };
 
@@ -195,7 +262,10 @@ export function AgentsRoomView() {
         </button>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_320px] overflow-hidden">
+      <div
+        className="grid min-h-0 flex-1 overflow-hidden"
+        style={{ gridTemplateColumns: '260px minmax(0, 1fr) clamp(360px, 30vw, 460px)' }}
+      >
         <aside className="min-h-0 border-r border-pi-border/70 bg-pi-bg-secondary/40">
           <div className="flex h-full min-h-0 flex-col">
             <div className="flex-shrink-0 px-3 py-3">
@@ -233,26 +303,55 @@ export function AgentsRoomView() {
                 onDelete={() => void deleteRoom(activeRoom)}
               />
               <Timeline room={activeRoom} run={latestRun} tasks={tasks} />
-              <div className="grid min-h-0 flex-1 grid-cols-2 gap-px overflow-hidden bg-pi-border/50">
-                <AgentGroupColumn
-                  group="left"
-                  label={activeRoom.leftLabel}
-                  icon={<UsersRound size={15} />}
-                  messages={messages.filter((message) => message.group === 'left')}
-                  tone="left"
-                />
-                <AgentGroupColumn
-                  group="right"
-                  label={activeRoom.rightLabel}
-                  icon={<Scale size={15} />}
-                  messages={messages.filter((message) => message.group === 'right')}
-                  tone="right"
+              <InterventionBar
+                room={activeRoom}
+                run={latestRun}
+                finalReportReady={Boolean(finalReport)}
+                onAddNote={() => setInterventionDraft({
+                  action: 'add_note',
+                  title: t('agentsRoom.intervention.noteTitle'),
+                  placeholder: t('agentsRoom.intervention.notePlaceholder'),
+                })}
+                onAddLeftEvidence={() => setInterventionDraft({
+                  action: 'add_evidence',
+                  group: 'left',
+                  title: t('agentsRoom.intervention.leftEvidenceTitle', { label: activeRoom.leftLabel }),
+                  placeholder: t('agentsRoom.intervention.evidencePlaceholder'),
+                })}
+                onAddRightEvidence={() => setInterventionDraft({
+                  action: 'add_evidence',
+                  group: 'right',
+                  title: t('agentsRoom.intervention.rightEvidenceTitle', { label: activeRoom.rightLabel }),
+                  placeholder: t('agentsRoom.intervention.evidencePlaceholder'),
+                })}
+                onRerunFinal={() => setInterventionDraft({
+                  action: 'rerun_final',
+                  title: t('agentsRoom.intervention.finalTitle'),
+                  placeholder: t('agentsRoom.intervention.finalPlaceholder'),
+                })}
+              />
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div className="grid min-h-0 flex-1 grid-cols-2 gap-px overflow-hidden bg-pi-border/50">
+                  <AgentGroupColumn
+                    group="left"
+                    label={activeRoom.leftLabel}
+                    icon={<UsersRound size={15} />}
+                    messages={messages.filter((message) => message.group === 'left')}
+                    tone="left"
+                  />
+                  <AgentGroupColumn
+                    group="right"
+                    label={activeRoom.rightLabel}
+                    icon={<Scale size={15} />}
+                    messages={messages.filter((message) => message.group === 'right')}
+                    tone="right"
+                  />
+                </div>
+                <NeutralStrip
+                  label={activeRoom.neutralLabel}
+                  messages={messages.filter((message) => message.group === 'neutral' || message.group === 'moderator')}
                 />
               </div>
-              <NeutralStrip
-                label={activeRoom.neutralLabel}
-                messages={messages.filter((message) => message.group === 'neutral' || message.group === 'moderator')}
-              />
             </div>
           ) : (
             <EmptyRoomCanvas onCreate={() => setLauncherOpen(true)} />
@@ -264,6 +363,8 @@ export function AgentsRoomView() {
             artifacts={artifacts}
             finalReport={finalReport}
             onInsertFinal={insertFinalToChat}
+            onInsertArtifact={insertArtifactToChat}
+            onOpenWorkspaceSource={openWorkspaceSource}
           />
         </aside>
       </div>
@@ -273,6 +374,8 @@ export function AgentsRoomView() {
           defaultQuestion={activeSession ? t('agentsRoom.defaultQuestion', { project: activeSession.projectName }) : ''}
           sessionId={activeSessionId ?? undefined}
           projectPath={activeSession?.projectPath}
+          availableModels={availableModels}
+          defaultModel={activeModel}
           onClose={() => setLauncherOpen(false)}
           onCreated={(room) => {
             setLauncherOpen(false);
@@ -284,8 +387,16 @@ export function AgentsRoomView() {
       {editingRoom && (
         <AgentRoomEditDialog
           room={editingRoom}
+          availableModels={availableModels}
           onClose={() => setEditingRoom(null)}
-          onSave={(input) => updateRoomLabels(editingRoom, input)}
+          onSave={(input) => updateRoom(editingRoom, input)}
+        />
+      )}
+      {interventionDraft && (
+        <AgentRoomInterventionDialog
+          draft={interventionDraft}
+          onClose={() => setInterventionDraft(null)}
+          onSubmit={(text) => void submitIntervention(interventionDraft, text)}
         />
       )}
     </div>
@@ -318,6 +429,18 @@ function RoomHeader({
           <StatusPill status={room.status} />
         </div>
         <p className="mt-1 line-clamp-1 text-xs text-pi-muted">{room.question}</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <SourceScopePill
+            label={t('agentsRoom.workspaceSearch')}
+            active={room.config.useWorkspaceSearch}
+            title={t('agentsRoom.workspaceSearchHint')}
+          />
+          <SourceScopePill
+            label={t('agentsRoom.webSearch')}
+            active={room.config.useWebSearch}
+            title={t('agentsRoom.webSearchHint')}
+          />
+        </div>
       </div>
       <div className="flex items-center gap-2">
         {onCancel ? (
@@ -357,6 +480,193 @@ function RoomHeader({
   );
 }
 
+function InterventionBar({
+  room,
+  run,
+  finalReportReady,
+  onAddNote,
+  onAddLeftEvidence,
+  onAddRightEvidence,
+  onRerunFinal,
+}: {
+  room: AgentRoom;
+  run: AgentRoomRun | null;
+  finalReportReady: boolean;
+  onAddNote: () => void;
+  onAddLeftEvidence: () => void;
+  onAddRightEvidence: () => void;
+  onRerunFinal: () => void;
+}) {
+  const { t } = useI18n();
+  const hasRun = Boolean(run);
+  const running = run?.status === 'running';
+  return (
+    <div className="flex flex-shrink-0 items-center gap-2 overflow-x-auto border-b border-pi-border/60 bg-pi-bg-secondary/35 px-4 py-2">
+      <span className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-wide text-pi-dim">
+        {t('agentsRoom.intervention.title')}
+      </span>
+      <InterventionButton
+        icon={<MessageSquarePlus size={13} />}
+        label={t('agentsRoom.intervention.addNote')}
+        title={t('agentsRoom.intervention.addNoteHint')}
+        disabled={!hasRun}
+        onClick={onAddNote}
+      />
+      <InterventionButton
+        icon={<FlaskConical size={13} />}
+        label={t('agentsRoom.intervention.addEvidence', { label: room.leftLabel })}
+        title={t('agentsRoom.intervention.addEvidenceHint')}
+        disabled={!hasRun}
+        onClick={onAddLeftEvidence}
+      />
+      <InterventionButton
+        icon={<FlaskConical size={13} />}
+        label={t('agentsRoom.intervention.addEvidence', { label: room.rightLabel })}
+        title={t('agentsRoom.intervention.addEvidenceHint')}
+        disabled={!hasRun}
+        onClick={onAddRightEvidence}
+      />
+      <InterventionButton
+        icon={<RefreshCw size={13} />}
+        label={t('agentsRoom.intervention.rerunFinal')}
+        title={running ? t('agentsRoom.intervention.rerunFinalRunningHint') : t('agentsRoom.intervention.rerunFinalHint')}
+        disabled={!hasRun || running || !finalReportReady}
+        onClick={onRerunFinal}
+      />
+      {!hasRun && (
+        <span className="flex-shrink-0 text-[10px] text-pi-dim">{t('agentsRoom.intervention.needsRun')}</span>
+      )}
+    </div>
+  );
+}
+
+function InterventionButton({
+  icon,
+  label,
+  title,
+  disabled,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  title: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+      className="inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-lg border border-pi-border/70 bg-pi-bg/70 px-2.5 text-[11px] font-medium text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text disabled:cursor-not-allowed disabled:opacity-45"
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function AgentRoomInterventionDialog({
+  draft,
+  onClose,
+  onSubmit,
+}: {
+  draft: AgentRoomInterventionDraft;
+  onClose: () => void;
+  onSubmit: (text: string) => void;
+}) {
+  const { t } = useI18n();
+  const [text, setText] = useState('');
+  const optional = draft.action !== 'add_note';
+  const canSubmit = optional || text.trim().length > 0;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
+      <button className="absolute inset-0 cursor-default" aria-label={t('common.close')} onClick={onClose} />
+      <div className="pi-panel-material relative z-10 w-full max-w-xl overflow-hidden rounded-xl border border-pi-border shadow-2xl shadow-black/35">
+        <div className="flex items-start gap-3 border-b border-pi-border/70 px-4 py-3">
+          <span className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-pi-accent/20 bg-pi-accent/10 text-pi-accent">
+            <MessageSquarePlus size={15} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-pi-text">{draft.title}</div>
+            <div className="mt-1 text-[11px] leading-relaxed text-pi-dim">{t(`agentsRoom.intervention.${draft.action}Hint` as never)}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+            title={t('common.close')}
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <div className="p-4">
+          <textarea
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            placeholder={draft.placeholder}
+            className="pi-embedded-input min-h-[150px] w-full resize-y rounded-xl border border-pi-border/70 bg-pi-bg px-3 py-2 text-sm leading-relaxed text-pi-text outline-none transition-colors placeholder:text-pi-dim focus:border-pi-accent"
+          />
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-[11px] text-pi-dim">
+              {optional ? t('agentsRoom.intervention.optional') : t('agentsRoom.intervention.required')}
+            </span>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="h-8 rounded-lg border border-pi-border/70 px-3 text-xs font-medium text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                disabled={!canSubmit}
+                onClick={() => onSubmit(text.trim())}
+                className="h-8 rounded-lg bg-pi-accent px-3 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {t('agentsRoom.intervention.submit')}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SourceScopePill({
+  label,
+  active,
+  pending,
+  title,
+}: {
+  label: string;
+  active: boolean;
+  pending?: boolean;
+  title: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <span
+      title={title}
+      className={cn(
+        'inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[10px] font-medium',
+        active
+          ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
+          : 'border-pi-border/70 bg-pi-bg-tertiary/60 text-pi-dim',
+        pending && 'border-pi-warning/25 bg-pi-warning/10 text-pi-warning'
+      )}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {label}
+      {pending && <span className="text-[9px] opacity-80">{t('agentsRoom.plannedBadge')}</span>}
+    </span>
+  );
+}
+
 function Timeline({ room, run, tasks }: { room: AgentRoom; run: AgentRoomRun | null; tasks: AgentRoomTask[] }) {
   const { t } = useI18n();
   const stages = [
@@ -371,33 +681,71 @@ function Timeline({ room, run, tasks }: { room: AgentRoom; run: AgentRoomRun | n
   const activeIndex = stages.findIndex((stage) => stage === current);
 
   return (
-    <div className="flex flex-shrink-0 items-center gap-2 overflow-x-auto border-b border-pi-border/70 px-4 py-2">
-      {stages.map((stage, index) => {
-        const active = stage === current;
-        const done = room.status === 'completed' || (activeIndex >= 0 && index < activeIndex);
-        return (
-          <div
-            key={stage}
-            className={cn(
-              'inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold',
-              active
-                ? 'border-pi-accent/40 bg-pi-accent/10 text-pi-accent'
-                : done
-                  ? 'border-pi-success/30 bg-pi-success/10 text-pi-success'
-                  : 'border-pi-border bg-pi-bg-tertiary/60 text-pi-dim'
-            )}
-          >
-            {done ? <CheckCircle2 size={12} /> : active ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />}
-            {t(`agentsRoom.stage.${stage}` as never)}
-          </div>
-        );
-      })}
-      <div className="ml-auto hidden flex-shrink-0 text-[11px] text-pi-dim xl:block">
-        {t('agentsRoom.taskSummary', {
-          done: tasks.filter((task) => task.status === 'completed').length,
-          total: tasks.length,
+    <div className="flex flex-shrink-0 flex-col border-b border-pi-border/70">
+      <div className="flex items-center gap-2 overflow-x-auto px-4 py-2">
+        {stages.map((stage, index) => {
+          const active = stage === current;
+          const done = room.status === 'completed' || (activeIndex >= 0 && index < activeIndex);
+          return (
+            <div
+              key={stage}
+              className={cn(
+                'inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold',
+                active
+                  ? 'border-pi-accent/40 bg-pi-accent/10 text-pi-accent'
+                  : done
+                    ? 'border-pi-success/30 bg-pi-success/10 text-pi-success'
+                    : 'border-pi-border bg-pi-bg-tertiary/60 text-pi-dim'
+              )}
+            >
+              {done ? <CheckCircle2 size={12} /> : active ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />}
+              {t(`agentsRoom.stage.${stage}` as never)}
+            </div>
+          );
         })}
+        <div className="ml-auto hidden flex-shrink-0 text-[11px] text-pi-dim xl:block">
+          {t('agentsRoom.taskSummary', {
+            done: tasks.filter((task) => task.status === 'completed').length,
+            total: tasks.length,
+          })}
+        </div>
       </div>
+      {tasks.length > 0 && <TaskGraphStrip tasks={tasks} />}
+    </div>
+  );
+}
+
+function TaskGraphStrip({ tasks }: { tasks: AgentRoomTask[] }) {
+  const { t } = useI18n();
+
+  return (
+    <div className="flex items-center gap-1.5 overflow-x-auto border-t border-pi-border/50 px-4 py-2">
+      <span className="flex-shrink-0 text-[10px] font-semibold uppercase text-pi-dim">{t('agentsRoom.taskGraph')}</span>
+      {tasks.map((task) => (
+        <div
+          key={task.id}
+          className={cn(
+            'inline-flex h-7 max-w-[180px] flex-shrink-0 items-center gap-1.5 rounded-full border px-2 text-[10px] font-medium',
+            task.status === 'completed'
+              ? 'border-pi-success/25 bg-pi-success/10 text-pi-success'
+              : task.status === 'running'
+                ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
+                : task.status === 'failed'
+                  ? 'border-pi-error/30 bg-pi-error/10 text-pi-error'
+                  : 'border-pi-border bg-pi-bg-tertiary/60 text-pi-dim'
+          )}
+          title={[
+            task.title,
+            task.nodeId ? `node: ${task.nodeId}` : '',
+            task.purpose ? t(`agentsRoom.taskPurpose.${task.purpose}` as never) : '',
+            (task.dependencies?.length ?? 0) > 0 ? t('agentsRoom.taskDependencies', { count: task.dependencies.length }) : '',
+          ].filter(Boolean).join('\n')}
+        >
+          {task.status === 'running' ? <Loader2 size={11} className="animate-spin" /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+          <span className="truncate">{task.agentRole}</span>
+          {task.purpose && <span className="rounded-full bg-pi-bg/50 px-1 uppercase">{task.purpose}</span>}
+        </div>
+      ))}
     </div>
   );
 }
@@ -451,21 +799,24 @@ function AgentGroupColumn({
 function NeutralStrip({ label, messages }: { label: string; messages: AgentRoomMessage[] }) {
   const { t } = useI18n();
   return (
-    <div className="max-h-[220px] flex-shrink-0 overflow-y-auto border-t border-pi-border/70 bg-pi-bg-secondary/50 px-4 py-3">
-      <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-pi-text">
+    <section className="flex min-h-[240px] flex-[0_1_36%] flex-col overflow-hidden border-t border-pi-border/70 bg-pi-bg-secondary/50">
+      <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-pi-border/60 px-4 text-xs font-semibold text-pi-text">
         <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-pi-success/25 bg-pi-success/10 text-pi-success">
           <ShieldCheck size={14} />
         </span>
-        {label}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="text-[10px] font-medium text-pi-dim">{messages.length}</span>
       </div>
-      {messages.length === 0 ? (
-        <div className="text-xs text-pi-dim">{t('agentsRoom.neutralWaiting')}</div>
-      ) : (
-        <div className="grid gap-2 lg:grid-cols-2">
-          {messages.slice(-4).map((message) => <AgentRoomMessageCard key={message.id} message={message} compact />)}
-        </div>
-      )}
-    </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        {messages.length === 0 ? (
+          <div className="text-xs text-pi-dim">{t('agentsRoom.neutralWaiting')}</div>
+        ) : (
+          <div className="grid gap-3 xl:grid-cols-2">
+            {messages.map((message) => <AgentRoomMessageCard key={message.id} message={message} compact />)}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -473,36 +824,76 @@ function EvidencePanel({
   artifacts,
   finalReport,
   onInsertFinal,
+  onInsertArtifact,
+  onOpenWorkspaceSource,
 }: {
   artifacts: AgentRoomArtifact[];
   finalReport: AgentRoomArtifact | null;
   onInsertFinal: () => void;
+  onInsertArtifact: (artifact: AgentRoomArtifact) => void;
+  onOpenWorkspaceSource: (artifact: AgentRoomArtifact) => void;
 }) {
   const { t } = useI18n();
+  const addToast = useUIStore((s) => s.addToast);
+  const [filter, setFilter] = useState<AgentRoomArtifactFilter>('all');
+  const supportingArtifacts = finalReport
+    ? artifacts.filter((artifact) => artifact.id !== finalReport.id)
+    : artifacts;
+  const filteredArtifacts = supportingArtifacts.filter((artifact) => artifactMatchesFilter(artifact, filter));
+  const filters = agentRoomArtifactFilters(t);
+
+  const copyArtifact = async (artifact: AgentRoomArtifact) => {
+    try {
+      await navigator.clipboard.writeText(`# ${artifact.title}\n\n${artifact.content}`);
+      addToast({ type: 'success', message: t('common.copied') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('agentsRoom.copyArtifactFailed', { message: err instanceof Error ? err.message : String(err) }),
+      });
+    }
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-12 flex-shrink-0 items-center gap-2 border-b border-pi-border/70 px-3">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-pi-border/70 px-3 py-2">
         <FileText size={15} className="text-pi-accent" />
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold">{t('agentsRoom.evidence')}</div>
           <div className="text-[10px] text-pi-dim">{t('agentsRoom.evidenceCount', { count: artifacts.length })}</div>
         </div>
       </div>
+      <div className="flex flex-shrink-0 gap-1 overflow-x-auto border-b border-pi-border/60 px-3 py-2">
+        {filters.map((item) => (
+          <button
+            key={item.value}
+            onClick={() => setFilter(item.value)}
+            className={cn(
+              'h-7 flex-shrink-0 rounded-full border px-2.5 text-[10px] font-semibold transition-colors',
+              filter === item.value
+                ? 'border-pi-accent/35 bg-pi-accent/10 text-pi-accent'
+                : 'border-pi-border/70 bg-pi-bg-secondary/70 text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text'
+            )}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {finalReport && (
-          <div className="mb-3 rounded-xl border border-pi-accent/25 bg-pi-accent/10 p-3">
+        {finalReport && (filter === 'all' || filter === 'final') && (
+          <div className="mb-3 rounded-xl border border-pi-accent/25 bg-pi-accent/10 p-3 shadow-sm">
             <div className="flex items-center gap-2 text-xs font-semibold text-pi-accent">
               <Sparkles size={14} />
               {t('agentsRoom.finalReport')}
             </div>
-            <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-xs leading-relaxed text-pi-text">{finalReport.content}</p>
-            <button
-              onClick={onInsertFinal}
-              className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-lg bg-pi-accent px-3 text-xs font-semibold text-white transition-opacity hover:opacity-90"
-            >
-              <MessageSquarePlus size={13} />
-              {t('agentsRoom.insertFinal')}
-            </button>
+            <AgentRoomMarkdown content={finalReport.content} className="mt-2 text-pi-text" />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <ArtifactActionButton icon={<MessageSquarePlus size={13} />} label={t('agentsRoom.insertFinal')} onClick={onInsertFinal} primary />
+              <ArtifactActionButton icon={<Copy size={13} />} label={t('common.copy')} onClick={() => void copyArtifact(finalReport)} />
+              {workspaceCitationForArtifact(finalReport) && (
+                <ArtifactActionButton icon={<FolderOpen size={13} />} label={t('agentsRoom.openSource')} onClick={() => onOpenWorkspaceSource(finalReport)} />
+              )}
+            </div>
           </div>
         )}
 
@@ -510,19 +901,34 @@ function EvidencePanel({
           <div className="flex h-full items-center justify-center px-6 text-center text-xs leading-relaxed text-pi-dim">
             {t('agentsRoom.noArtifacts')}
           </div>
-        ) : (
+        ) : filter === 'final' && !finalReport ? (
+          <div className="flex h-full items-center justify-center px-6 text-center text-xs leading-relaxed text-pi-dim">
+            {t('agentsRoom.noFinalReport')}
+          </div>
+        ) : filter !== 'final' && filteredArtifacts.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-6 text-center text-xs leading-relaxed text-pi-dim">
+            {t('agentsRoom.noArtifactsForFilter')}
+          </div>
+        ) : filter !== 'final' && filteredArtifacts.length > 0 ? (
           <div className="space-y-2">
-            {artifacts.map((artifact) => (
-              <ArtifactCard key={artifact.id} artifact={artifact} />
+            {filteredArtifacts.map((artifact) => (
+              <ArtifactCard
+                key={artifact.id}
+                artifact={artifact}
+                onCopy={() => void copyArtifact(artifact)}
+                onInsert={() => onInsertArtifact(artifact)}
+                onOpenSource={workspaceCitationForArtifact(artifact) ? () => onOpenWorkspaceSource(artifact) : undefined}
+              />
             ))}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
 }
 
 function AgentRoomMessageCard({ message, compact }: { message: AgentRoomMessage; compact?: boolean }) {
+  const content = messageText(message);
   return (
     <article className="rounded-xl border border-pi-border/70 bg-pi-bg-secondary/70 p-3 shadow-sm">
       <div className="flex items-center gap-2">
@@ -534,14 +940,22 @@ function AgentRoomMessageCard({ message, compact }: { message: AgentRoomMessage;
           <div className="truncate text-[10px] text-pi-dim">{message.role}{message.round ? ` · R${message.round}` : ''}</div>
         </div>
       </div>
-      <p className={cn('mt-2 whitespace-pre-wrap text-xs leading-relaxed text-pi-muted', compact && 'line-clamp-4')}>
-        {messageText(message)}
-      </p>
+      <AgentRoomMarkdown content={content} compact={compact} className="mt-2 text-pi-muted" />
     </article>
   );
 }
 
-function ArtifactCard({ artifact }: { artifact: AgentRoomArtifact }) {
+function ArtifactCard({
+  artifact,
+  onCopy,
+  onInsert,
+  onOpenSource,
+}: {
+  artifact: AgentRoomArtifact;
+  onCopy: () => void;
+  onInsert: () => void;
+  onOpenSource?: () => void;
+}) {
   const { t } = useI18n();
   const primaryCitation = artifact.citations[0];
   return (
@@ -572,8 +986,58 @@ function ArtifactCard({ artifact }: { artifact: AgentRoomArtifact }) {
           </div>
         </div>
       </div>
-      <p className="mt-2 line-clamp-5 whitespace-pre-wrap text-xs leading-relaxed text-pi-muted">{artifact.content}</p>
+      <AgentRoomMarkdown content={artifact.content} compact className="mt-2 text-pi-muted" />
+      <div className="mt-3 flex flex-wrap gap-2">
+        <ArtifactActionButton icon={<Copy size={13} />} label={t('common.copy')} onClick={onCopy} />
+        <ArtifactActionButton icon={<MessageSquarePlus size={13} />} label={t('agentsRoom.insertArtifact')} onClick={onInsert} />
+        {onOpenSource && (
+          <ArtifactActionButton icon={<FolderOpen size={13} />} label={t('agentsRoom.openSource')} onClick={onOpenSource} />
+        )}
+      </div>
     </article>
+  );
+}
+
+function ArtifactActionButton({
+  icon,
+  label,
+  onClick,
+  primary,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors',
+        primary
+          ? 'border-pi-accent bg-pi-accent text-white hover:opacity-90'
+          : 'border-pi-border/70 bg-pi-bg-secondary/70 text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function AgentRoomMarkdown({
+  content,
+  compact,
+  className,
+}: {
+  content: string;
+  compact?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className={cn('agent-room-markdown pi-selectable min-w-0', compact && 'agent-room-markdown-compact', className)}>
+      <MarkdownRenderer content={content.trim() || ' '} />
+    </div>
   );
 }
 
@@ -615,12 +1079,16 @@ function AgentRoomLauncher({
   defaultQuestion,
   sessionId,
   projectPath,
+  availableModels,
+  defaultModel,
   onClose,
   onCreated,
 }: {
   defaultQuestion: string;
   sessionId?: string;
   projectPath?: string;
+  availableModels: ModelInfo[];
+  defaultModel: ModelInfo | null;
   onClose: () => void;
   onCreated: (room: AgentRoom) => void;
 }) {
@@ -634,6 +1102,8 @@ function AgentRoomLauncher({
     debateRounds: 2,
     useWorkspaceSearch: true,
     useWebSearch: false,
+    quickModel: defaultModel ? modelRefFromModel(defaultModel) : undefined,
+    deepModel: defaultModel ? modelRefFromModel(defaultModel) : undefined,
   });
   const [saving, setSaving] = useState(false);
 
@@ -651,6 +1121,8 @@ function AgentRoomLauncher({
       rightLabel: draft.rightLabel,
       neutralLabel: draft.neutralLabel,
       debateRounds: draft.debateRounds,
+      quickModel: draft.quickModel,
+      deepModel: draft.deepModel,
       useWorkspaceSearch: draft.useWorkspaceSearch,
       useWebSearch: draft.useWebSearch,
     };
@@ -710,6 +1182,22 @@ function AgentRoomLauncher({
               neutralLabel: preset.neutral,
             }))}
           />
+          <div className="grid gap-3 md:grid-cols-2">
+            <AgentRoomModelSelect
+              label={t('agentsRoom.quickModel')}
+              hint={t('agentsRoom.quickModelHint')}
+              value={draft.quickModel}
+              models={availableModels}
+              onChange={(quickModel) => setDraft((current) => ({ ...current, quickModel }))}
+            />
+            <AgentRoomModelSelect
+              label={t('agentsRoom.deepModel')}
+              hint={t('agentsRoom.deepModelHint')}
+              value={draft.deepModel}
+              models={availableModels}
+              onChange={(deepModel) => setDraft((current) => ({ ...current, deepModel }))}
+            />
+          </div>
           <div className="grid gap-3 md:grid-cols-3">
             <label className="block space-y-1.5">
               <span className="text-[10px] font-semibold uppercase text-pi-dim">{t('agentsRoom.debateRounds')}</span>
@@ -722,8 +1210,18 @@ function AgentRoomLauncher({
                 className="h-9 w-full rounded-xl border border-pi-border bg-pi-bg px-3 text-sm text-pi-text focus:border-pi-accent focus:outline-none"
               />
             </label>
-            <ToggleOption label={t('agentsRoom.workspaceSearch')} checked={draft.useWorkspaceSearch} onClick={() => setDraft((current) => ({ ...current, useWorkspaceSearch: !current.useWorkspaceSearch }))} />
-            <ToggleOption label={t('agentsRoom.webSearch')} checked={draft.useWebSearch} onClick={() => setDraft((current) => ({ ...current, useWebSearch: !current.useWebSearch }))} />
+            <ToggleOption
+              label={t('agentsRoom.workspaceSearch')}
+              hint={t('agentsRoom.workspaceSearchHint')}
+              checked={draft.useWorkspaceSearch}
+              onClick={() => setDraft((current) => ({ ...current, useWorkspaceSearch: !current.useWorkspaceSearch }))}
+            />
+            <ToggleOption
+              label={t('agentsRoom.webSearch')}
+              hint={t('agentsRoom.webSearchHint')}
+              checked={draft.useWebSearch}
+              onClick={() => setDraft((current) => ({ ...current, useWebSearch: !current.useWebSearch }))}
+            />
           </div>
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-pi-border/70 px-5 py-4">
@@ -746,12 +1244,14 @@ function AgentRoomLauncher({
 
 function AgentRoomEditDialog({
   room,
+  availableModels,
   onClose,
   onSave,
 }: {
   room: AgentRoom;
+  availableModels: ModelInfo[];
   onClose: () => void;
-  onSave: (input: Pick<AgentRoomCreateInput, 'title' | 'leftLabel' | 'rightLabel' | 'neutralLabel'>) => Promise<void>;
+  onSave: (input: Pick<AgentRoomCreateInput, 'title' | 'leftLabel' | 'rightLabel' | 'neutralLabel' | 'quickModel' | 'deepModel'>) => Promise<void>;
 }) {
   const { t } = useI18n();
   const addToast = useUIStore((s) => s.addToast);
@@ -760,6 +1260,8 @@ function AgentRoomEditDialog({
     leftLabel: room.leftLabel,
     rightLabel: room.rightLabel,
     neutralLabel: room.neutralLabel,
+    quickModel: room.config.quickModel,
+    deepModel: room.config.deepModel,
   });
   const [saving, setSaving] = useState(false);
 
@@ -774,7 +1276,7 @@ function AgentRoomEditDialog({
     }
     setSaving(true);
     try {
-      await onSave({ title, leftLabel, rightLabel, neutralLabel });
+      await onSave({ title, leftLabel, rightLabel, neutralLabel, quickModel: draft.quickModel, deepModel: draft.deepModel });
     } finally {
       setSaving(false);
     }
@@ -811,6 +1313,22 @@ function AgentRoomEditDialog({
               neutralLabel: preset.neutral,
             }))}
           />
+          <div className="grid gap-3 md:grid-cols-2">
+            <AgentRoomModelSelect
+              label={t('agentsRoom.quickModel')}
+              hint={t('agentsRoom.quickModelHint')}
+              value={draft.quickModel}
+              models={availableModels}
+              onChange={(quickModel) => setDraft((current) => ({ ...current, quickModel }))}
+            />
+            <AgentRoomModelSelect
+              label={t('agentsRoom.deepModel')}
+              hint={t('agentsRoom.deepModelHint')}
+              value={draft.deepModel}
+              models={availableModels}
+              onChange={(deepModel) => setDraft((current) => ({ ...current, deepModel }))}
+            />
+          </div>
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-pi-border/70 px-5 py-4">
           <button onClick={onClose} className="h-8 rounded-lg border border-pi-border px-3 text-xs font-semibold text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text">
@@ -871,6 +1389,48 @@ function GroupPresetStrip({ onApply }: { onApply: (preset: { left: string; right
   );
 }
 
+function AgentRoomModelSelect({
+  label,
+  hint,
+  value,
+  models,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value?: ModelRef;
+  models: ModelInfo[];
+  onChange: (value: ModelRef | undefined) => void;
+}) {
+  const { t } = useI18n();
+  const selectedKey = value ? modelRefKey(value) : '';
+  const selectedExists = !value || models.some((model) => modelKey(model) === selectedKey);
+
+  return (
+    <label className="block space-y-1.5">
+      <span className="text-[10px] font-semibold uppercase text-pi-dim">{label}</span>
+      <select
+        value={selectedKey}
+        onChange={(event) => onChange(modelRefFromKey(event.target.value, models))}
+        className="h-9 w-full rounded-xl border border-pi-border bg-pi-bg px-3 text-xs text-pi-text focus:border-pi-accent focus:outline-none"
+      >
+        <option value="">{t('agentsRoom.autoModel')}</option>
+        {!selectedExists && value && (
+          <option value={selectedKey}>{value.provider}/{value.id}</option>
+        )}
+        {models.map((model) => (
+          <option key={modelKey(model)} value={modelKey(model)}>
+            {model.provider}/{model.name}
+          </option>
+        ))}
+      </select>
+      <p className="text-[10px] leading-relaxed text-pi-dim">
+        {models.length === 0 ? t('agentsRoom.noModels') : hint}
+      </p>
+    </label>
+  );
+}
+
 function LauncherInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return (
     <label className="block space-y-1.5">
@@ -884,21 +1444,46 @@ function LauncherInput({ label, value, onChange }: { label: string; value: strin
   );
 }
 
-function ToggleOption({ label, checked, onClick }: { label: string; checked: boolean; onClick: () => void }) {
+function ToggleOption({
+  label,
+  hint,
+  badge,
+  checked,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  hint?: string;
+  badge?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
-      onClick={onClick}
+      onClick={() => {
+        if (!disabled) onClick();
+      }}
+      aria-disabled={disabled}
+      title={hint}
       className={cn(
-        'mt-5 flex h-9 items-center justify-between rounded-xl border px-3 text-xs font-semibold transition-colors',
+        'flex min-h-[76px] flex-col justify-between rounded-xl border px-3 py-2 text-left transition-colors',
         checked
           ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
-          : 'border-pi-border text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
+          : 'border-pi-border text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text',
+        disabled && 'cursor-not-allowed opacity-75 hover:bg-transparent hover:text-pi-muted'
       )}
     >
-      {label}
-      <span className={cn('h-4 w-7 rounded-full p-0.5 transition-colors', checked ? 'bg-pi-accent' : 'bg-pi-bg-hover')}>
-        <span className={cn('block h-3 w-3 rounded-full bg-white transition-transform', checked && 'translate-x-3')} />
+      <span className="flex w-full items-center justify-between gap-2">
+        <span className="min-w-0 text-xs font-semibold">
+          {label}
+          {badge && <span className="ml-1 rounded-full border border-pi-warning/30 bg-pi-warning/10 px-1.5 py-0.5 text-[9px] text-pi-warning">{badge}</span>}
+        </span>
+        <span className={cn('h-4 w-7 flex-shrink-0 rounded-full p-0.5 transition-colors', checked ? 'bg-pi-accent' : 'bg-pi-bg-hover')}>
+          <span className={cn('block h-3 w-3 rounded-full bg-white transition-transform', checked && 'translate-x-3')} />
+        </span>
       </span>
+      {hint && <span className="mt-1 block text-[10px] font-normal leading-relaxed text-pi-dim">{hint}</span>}
     </button>
   );
 }
@@ -960,4 +1545,53 @@ function artifactSourceLabel(citation: AgentRoomArtifact['citations'][number]): 
   if (citation.kind === 'web') return 'Web';
   if (citation.kind === 'memory') return 'Memory';
   return 'User';
+}
+
+function agentRoomArtifactFilters(t: ReturnType<typeof useI18n>['t']): Array<{ value: AgentRoomArtifactFilter; label: string }> {
+  return [
+    { value: 'all', label: t('agentsRoom.filter.all') },
+    { value: 'final', label: t('agentsRoom.filter.final') },
+    { value: 'evidence', label: t('agentsRoom.filter.evidence') },
+    { value: 'claims', label: t('agentsRoom.filter.claims') },
+    { value: 'risks', label: t('agentsRoom.filter.risks') },
+  ];
+}
+
+function artifactMatchesFilter(artifact: AgentRoomArtifact, filter: AgentRoomArtifactFilter): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'final') return artifact.type === 'final_report';
+  if (filter === 'evidence') return artifact.type === 'evidence';
+  if (filter === 'claims') return artifact.type === 'claim' || artifact.type === 'counterclaim' || artifact.type === 'summary';
+  if (filter === 'risks') return artifact.type === 'risk';
+  return true;
+}
+
+function workspaceCitationForArtifact(artifact: AgentRoomArtifact): AgentRoomCitation | undefined {
+  return artifact.citations.find((citation) => {
+    const source = citation.source.trim();
+    return citation.kind === 'workspace'
+      && Boolean(source)
+      && source !== 'workspace'
+      && !/^[a-zA-Z]:[\\/]/.test(source);
+  });
+}
+
+function modelRefFromModel(model: ModelInfo): ModelRef {
+  return { provider: model.provider, id: model.id };
+}
+
+function modelKey(model: ModelInfo): string {
+  return `${model.provider}:::${model.id}`;
+}
+
+function modelRefKey(model: ModelRef): string {
+  return `${model.provider}:::${model.id}`;
+}
+
+function modelRefFromKey(key: string, models: ModelInfo[]): ModelRef | undefined {
+  if (!key) return undefined;
+  const model = models.find((item) => modelKey(item) === key);
+  if (model) return modelRefFromModel(model);
+  const [provider, id] = key.split(':::');
+  return provider && id ? { provider, id } : undefined;
 }

@@ -32,7 +32,7 @@
 - 当用户选中文本时，只优化选区；否则优化整段输入。
 - 请求后端 `piApi.optimizePrompt()`。
 - 请求统一交给后端 `piApi.optimizePrompt()`；前端不再维护第二套本地 fallback 模板。
-- 优化完成后替换输入框内容，并保留最近一次优化快照，支持按钮或 `Ctrl/Cmd+Z` 撤销。
+- 优化完成后先显示预览卡片，用户接受后才替换输入框；接受后保留最近一次优化快照，支持按钮或 `Ctrl/Cmd+Z` 撤销。
 - 请求上下文包含：
   - `text`
   - `projectName`
@@ -43,6 +43,7 @@
   - `selectionOnly`
   - `sessionId`
   - `currentModel`
+  - `preferredOptimizerModel`
 
 ### 2.2 后端能力
 
@@ -61,7 +62,7 @@
   - `PI_AGENT_FAST_PROVIDER`
   - `PI_AGENT_FAST_MODEL`
   - `ANTHROPIC_DEFAULT_HAIKU_MODEL`
-- 快速模型默认 `1s` 超时，失败后返回本地规则生成的 fallback prompt；可用 `PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS` 在 `500ms - 8000ms` 范围内调整。
+- 快速模型默认 `6s` 超时，失败后返回本地规则生成的 fallback prompt；可用 `PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS` 在 `1000ms - 30000ms` 范围内调整。
 - 返回结构包含：
   - `optimized`
   - `source: model | local`
@@ -97,95 +98,45 @@
 - 支持基础上下文参数，后续扩展成本低。
 - 已和模型注册表、Provider 配置链路打通。
 
-## 3. 当前主要问题
+## 3. 当前状态与剩余优化点
 
-### 3.1 本地 fallback 与后端模板重复
+### 3.1 已解决项
 
-前端 `ChatInput.tsx` 和后端 `prompt-optimizer-service.ts` 各自维护一份本地规则模板，长期会导致：
+截至 2026-05-22，提示词优化能力已经完成以下闭环：
 
-- 优化风格不一致。
-- 修复一个模板 bug 时容易漏改另一份。
-- 国际化和任务识别规则分散。
+- 前端不再维护第二套本地 fallback 模板，统一由后端 `prompt-optimizer-service.ts` 负责规则化 fallback。
+- 中文、英文、日文模板已经按 UTF-8 清理，后端 guard 会拦截明显 mojibake。
+- 前端已支持 `auto / polish / execute / debug / review / research / ui / agent_room` 模式菜单。
+- 请求已携带文件引用、图片引用、会话摘要和 Git 工作区状态。
+- 后端已返回 `mode`、`qualityScore`、`changedIntentRisk`、`warnings`、`fallbackReason`。
+- 快速模型默认 6 秒超时，减少网络较慢或首次请求时误触发 fallback 的概率。
+- Vite 大 chunk 警告已通过懒加载和 CodeMirror 分包处理。
 
-建议：保留后端为唯一规则引擎，前端只做展示与回退提示。极端断连时再使用一个很轻的前端最小模板。
+### 3.2 本轮新增项
 
-### 3.2 中文模板疑似存在编码污染
+本轮继续补齐了用户可见的确认闭环和 skill 扩展入口：
 
-从代码读取结果看，部分中文模板呈现类似 `璇蜂綘...` 的乱码形态。无论这是文件真实内容还是终端编码显示问题，都应作为 P0 进行确认。
+- 优化完成后不再立即覆盖输入框，而是在输入框上方显示轻量预览卡片。
+- 预览卡片展示优化前、优化后、模式、来源、质量评分、意图变更风险和最多三条警告。
+- 用户可以在预览卡片里接受、复制、重新优化或关闭。
+- 接受后才替换输入框内容，并继续保留最近一次优化的撤销能力。
+- `PromptOptimizeResult.source` 已扩展为 `model | local | skill`，并增加 `skillName`。
+- 后端新增显式启用的 `prompt-engineering-expert` skill 读取入口：
+  - 如果设置 `PI_AGENT_PROMPT_OPTIMIZER_SKILL_PATH`，优先读取该文件。
+  - 如果设置 `PI_AGENT_PROMPT_OPTIMIZER_SKILL=prompt-engineering-expert`，则依次查找项目内 `.pi/skills/prompt-engineering-expert/SKILL.md`、项目内 `.agents/skills/prompt-engineering-expert/SKILL.md`、`CODEX_HOME/skills/prompt-engineering-expert/SKILL.md`。
+  - 如果显式启用但未找到文件，则使用内置 `prompt-engineering-expert` 策略。
+  - 默认不自动读取项目 skill，避免未信任项目悄悄影响优化器并把 skill 内容发送给模型。
+- 如果 skill 被加载，模型优化会把 skill 指令加入 system/user prompt，并在结果里返回 `source: skill` 与 `skillName`。
 
-风险：
+### 3.3 仍需继续优化
 
-- 本地 fallback 生成的中文提示词不可读。
-- 模型侧 system/user prompt 里包含乱码会影响优化质量。
-- 文档、i18n、服务端模板之间可能继续扩散乱码。
+当前剩余的高价值优化点：
 
-建议：
-
-- 用 UTF-8 强制检查相关文件。
-- 将所有中文 fallback 模板统一抽到一个 UTF-8 fixture。
-- 增加快照测试，验证中文输出不包含常见 mojibake 片段。
-
-### 3.3 上下文过浅
-
-当前后端只知道“是否有文件引用/图片引用”，不知道：
-
-- 引用了哪些文件。
-- 文件类型、路径、选中行号、摘要是什么。
-- 当前会话之前讨论过什么。
-- 当前 Git 分支、变更、错误日志是什么。
-- 用户期望的是代码修改、排查、设计、解释、研究还是多 Agent 分析。
-
-这会导致优化结果只能泛化加结构，不能真正贴合当前工作。
-
-### 3.4 缺少模式选择
-
-目前只有一个“优化”动作，没有可选模式：
-
-- 精简模式：只让原提示更清楚。
-- 执行模式：转成可直接给 coding agent 执行的任务。
-- 调试模式：补充复现、日志、预期行为、排查路径。
-- 代码审查模式：转成 review prompt。
-- 研究模式：补充资料来源、证据要求、输出格式。
-- 多 Agent 模式：转成适合 Agents 聊天室拆解的问题。
-
-用户不同场景下需要的优化方向差异很大。
-
-### 3.5 缺少优化结果预览与回滚
-
-现在优化完成后直接替换输入框内容。问题：
-
-- 用户无法比较优化前后差异。
-- 长提示词被改写后不容易恢复。
-- 模型输出不理想时体验不稳。
-
-建议改成可选的轻量 diff popover：
-
-- 默认展示优化结果。
-- 用户可以接受、替换选区、插入到下方、复制、重新优化、撤销。
-- 设置里可选择“直接替换”或“先预览”。
-
-### 3.6 缺少质量评估
-
-当前只要模型返回非空就接受，没有判断：
-
-- 是否改变了用户意图。
-- 是否丢失路径、版本、约束。
-- 是否过度扩写。
-- 是否仍然含糊。
-- 是否包含模型回答而不是提示词。
-
-建议增加轻量评分和 guardrail。
-
-### 3.7 快速模型配置不够可见
-
-目前快速模型主要靠环境变量和模型打分，用户在 UI 里不容易知道：
-
-- 当前优化使用哪个模型。
-- 为什么没有用 Mini Hub 的 GPT 模型。
-- 为什么回退到本地模板。
-- 是否可以单独配置“提示词优化模型”。
-
-建议在设置页增加“提示词优化模型”配置项。
+- 设置页已支持“提示词优化模型”显式选择；后续还需要在预览卡片里更明确展示“本次为什么选择该模型”的诊断信息。
+- `prompt-engineering-expert` 已有读取入口，但还没有和 Skill Hub 的启用/禁用状态、Trust Center 完整联动。
+- 缺少提示词优化单元测试和快照测试，尤其是中文无乱码、路径/版本保留、模式输出差异、模型超时 fallback。
+- 预览卡片目前是轻量双栏对比，不是逐词/逐行 diff；长提示词的差异定位还可以继续增强。
+- 质量分、风险和用户接受/撤销行为尚未进入本地 telemetry，无法形成偏好学习。
 
 ## 4. 目标能力分层
 
@@ -214,7 +165,7 @@
 验收标准：
 
 - 中文输入优化后无乱码。
-- 后端断网、无 key、模型超时都能在 1 秒内 fallback。
+- 后端断网、无 key、模型超时都能在配置的超时窗口内 fallback，默认不超过 6 秒。
 - 用户可以撤销最近一次优化。
 - 优化结果不丢失 `@文件`、路径、版本号、错误信息。
 
@@ -226,7 +177,7 @@
 - 已为返回结果补齐 `mode`、`qualityScore`、`changedIntentRisk`、`warnings`、`fallbackReason` 元信息。
 - 已增加模型输出 guard：空输出、疑似回答任务、乱码、路径/版本/文件名丢失时降级或告警。
 - 已补齐中英日文案，并在 toast 中区分“快速模型”和“本地模板”来源。
-- 已将快速模型默认超时缩短到 `1s`，并支持 `PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS` 配置。
+- 已将快速模型默认超时调整为 `6s`，并支持 `PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS` 在 `1000ms - 30000ms` 内配置。
 - 已通过 `npm run typecheck:server`、`npm run typecheck:frontend` 和 `npm run build`。
 
 ### 4.2 P1：上下文增强与模式化优化
@@ -244,6 +195,7 @@ interface PromptOptimizeInput {
   language?: 'zh' | 'en' | 'ja';
   selectionOnly?: boolean;
   currentModel?: { provider: string; id: string };
+  preferredOptimizerModel?: { provider: string; id: string };
   fileReferences?: Array<{
     path: string;
     name?: string;
@@ -301,8 +253,12 @@ interface PromptOptimizeInput {
 - 已扩展 `PromptOptimizeInput/Result` 类型，支持 `mode`、`fileReferences`、`imageReferences`、`sessionContext`、`workspaceContext`。
 - 输入框已增加提示词优化模式菜单，支持智能、润色、执行、调试、审查、研究、UI、多智能体模式。
 - 前端请求会携带已加入对话的文件路径/行号/摘录、图片信息、最近会话上下文和 Git 分支/变更文件。
+- 设置页模型 Tab 已增加“提示词优化模型”配置，可单独指定 Mini/Flash/Air/Haiku 类快速模型。
+- 前端会把 `preferredOptimizerModel` 随优化请求发送给后端。
 - 后端会优先使用显式模式；智能模式下继续自动识别任务类型。
 - 后端模型提示和本地 fallback 已按模式生成不同的要求和输出结构。
+- 优化结果已改为输入框上方的轻量预览卡片，支持接受、复制、重新优化和关闭。
+- 预览卡片已展示来源、模式、质量评分、意图变更风险和警告信息。
 
 ### 4.3 P2：Skill 驱动的提示词工程工作台
 
@@ -346,6 +302,14 @@ interface PromptOptimizeInput {
 - 安装或启用 `prompt-engineering-expert` 后，优化风格可被 skill 改变。
 - 禁用 skill 后回到内置策略。
 - skill 本身出错时不会阻塞优化按钮。
+
+当前进度（2026-05-22）：
+
+- `PromptOptimizeResult.source` 已扩展为 `model | local | skill`，并增加 `skillName`。
+- 后端已新增显式启用的 `prompt-engineering-expert` 读取入口，可从环境变量指定路径、项目 `.pi/.agents` 目录或 `CODEX_HOME` 读取。
+- 设置 `PI_AGENT_PROMPT_OPTIMIZER_SKILL=prompt-engineering-expert` 时可启用文件或内置提示词工程策略。
+- 已加载的 skill 会进入模型优化 system/user prompt；模型成功返回时，前端可看到 skill 来源。
+- 下一步仍需把这个入口和 Skill Hub/Trust Center 的启用状态完整打通。
 
 ### 4.4 P3：质量闭环与自我进步
 
@@ -464,7 +428,7 @@ UI 放置建议：
 
 建议：
 
-- 默认超时：`1s`，比此前 `12s/8s` 更贴近输入框即时交互；允许通过 `PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS` 调整到 `500ms - 8000ms`。
+- 默认超时：`6s`，在输入框即时反馈和真实网络延迟之间取平衡；允许通过 `PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS` 调整到 `1000ms - 30000ms`。
 - 最大 tokens：
   - polish: 600
   - execute/debug/review/ui: 1200
@@ -478,6 +442,12 @@ UI 放置建议：
 - provider/model 标准化时保留小写 `glm`。
 - 模型选择 UI 中显示真实 provider 和 model id。
 - 快速模型若选择 GLM，应优先选 `glm-4.5-air`、`glm-4-flash` 等轻量模型；`glm-5.1` 可作为当前会话模型，不一定适合提示词优化的快速路径。
+
+当前实现补充（2026-05-22）：
+
+- `PromptOptimizeInput` 已支持 `preferredOptimizerModel`。
+- 后端 `selectFastModel()` 的优先级已调整为：设置页指定模型 > 环境变量快速模型 > 自动评分出的轻量快速模型 > 当前会话模型兜底。
+- 模型提示上下文会记录 `preferred_optimizer_model`，方便排查“为什么优化器使用这个模型”。
 
 ## 7. 安全与隐私
 
@@ -623,7 +593,7 @@ npm.cmd run build
 | 研究任务 | “分析 Electron 是否迁移 Tauri” | 输出资料来源、对比维度、结论格式 |
 | 多 Agent 任务 | “让多个 agents 辩论这个方案” | 输出双方视角、中立评审、证据标准 |
 | 无模型 | 未配置 API Key | 使用本地 fallback，且提示来源 |
-| 模型超时 | 快速模型默认 1s 未返回 | fallback，不阻塞输入框 |
+| 模型超时 | 快速模型默认 6s 未返回 | fallback，不阻塞输入框 |
 
 ## 11. 发布验收标准
 
@@ -641,7 +611,7 @@ npm.cmd run build
 
 1. P0 编码修复和后端统一 fallback。
 2. P1 模式菜单和上下文增强。
-3. 设置页增加“提示词优化模型”。
+3. 设置页增加“提示词优化模型”。（已完成）
 4. 优化结果预览与撤销。
 5. 接入 `prompt-engineering-expert` skill。
 

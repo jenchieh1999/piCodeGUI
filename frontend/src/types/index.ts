@@ -550,13 +550,18 @@ export interface AgentRoomTask {
   id: string;
   roomId: string;
   runId: string;
-  group: Exclude<AgentRoomGroup, 'system' | 'moderator'>;
+  nodeId?: string;
+  group: Exclude<AgentRoomGroup, 'system'>;
   agentRole: string;
   title: string;
   prompt: string;
+  purpose?: 'quick' | 'deep';
   status: 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
   dependencies: string[];
+  dependsOn?: string[];
+  sourceArtifactIds?: string[];
   outputArtifactIds: string[];
+  retryCount?: number;
   error?: string;
   startedAt?: number;
   completedAt?: number;
@@ -586,6 +591,24 @@ export interface AgentRoomCreateInput {
   useWebSearch?: boolean;
   useWorkspaceSearch?: boolean;
   persistMemory?: boolean;
+}
+
+export type AgentRoomInterventionAction = 'add_note' | 'add_evidence' | 'rerun_final';
+
+export interface AgentRoomInterventionInput {
+  action: AgentRoomInterventionAction;
+  group?: 'left' | 'right';
+  note?: string;
+  instruction?: string;
+}
+
+export interface AgentRoomInterventionResult {
+  room: AgentRoom;
+  run: AgentRoomRun;
+  messages: AgentRoomMessage[];
+  artifacts: AgentRoomArtifact[];
+  tasks: AgentRoomTask[];
+  snapshot: AgentRoomSnapshot;
 }
 
 export interface ServerDiagnostics {
@@ -926,6 +949,8 @@ export interface WorkspaceTreeResult {
   state: 'ok' | 'missing' | 'error';
   path: string;
   entries: WorkspaceTreeEntry[];
+  truncated?: boolean;
+  totalEntries?: number;
   error?: string;
 }
 
@@ -962,6 +987,8 @@ export interface WorkspaceSearchResult {
   state: 'ok' | 'missing' | 'error';
   query: string;
   files: WorkspaceTreeEntry[];
+  indexedFileCount?: number;
+  truncated?: boolean;
   error?: string;
 }
 
@@ -1012,14 +1039,19 @@ export interface PromptOptimizeInput {
     provider: string;
     id: string;
   };
+  preferredOptimizerModel?: {
+    provider: string;
+    id: string;
+  };
 }
 
 export interface PromptOptimizeResult {
   optimized: string;
-  source: 'model' | 'local';
+  source: 'model' | 'local' | 'skill';
   durationMs: number;
   provider?: string;
   modelId?: string;
+  skillName?: string;
   warning?: string;
   mode?: PromptOptimizeMode;
   qualityScore?: number;
@@ -1165,6 +1197,7 @@ export interface AppSettings {
   rightPanelType: RightPanelType;
   showThinking: boolean;
   compactOnOverflow: boolean;
+  promptOptimizerModel: { provider: string; id: string } | null;
   chatBackgroundImage: string;
   chatBackgroundDim: number;
 }

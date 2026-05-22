@@ -6,6 +6,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { useChatStore } from '../../stores/chatStore';
 import { piApi } from '../../api/client';
 import { ChannelsSettings } from './ChannelsSettings';
+import { thinkingLevelPillClass } from '../../lib/thinkingLevelStyles';
 import type {
   AuthProviderStatus,
   AuthProviderTestResult,
@@ -906,8 +907,23 @@ function modelForSession(session: Session, models: ModelInfo[], fallback: ModelI
     ?? fallback;
 }
 
+function serializeModelKey(model: Pick<ModelInfo, 'provider' | 'id'>): string {
+  return JSON.stringify({ provider: model.provider, id: model.id });
+}
+
+function modelFromSerializedKey(value: string, models: ModelInfo[]): ModelInfo | undefined {
+  try {
+    const parsed = JSON.parse(value) as { provider?: unknown; id?: unknown };
+    if (typeof parsed.provider !== 'string' || typeof parsed.id !== 'string') return undefined;
+    return models.find((model) => model.provider === parsed.provider && model.id === parsed.id);
+  } catch {
+    return undefined;
+  }
+}
+
 function ModelSettings({ currentModel, thinkingLevel, availableModels, activeSessionId }: ModelSettingsProps) {
   const { t } = useI18n();
+  const settings = useSettingsStore();
   const addToast = useUIStore((s) => s.addToast);
   const setCurrentModel = useModelStore((s) => s.setCurrentModel);
   const setGlobalThinkingLevel = useModelStore((s) => s.setThinkingLevel);
@@ -915,6 +931,9 @@ function ModelSettings({ currentModel, thinkingLevel, availableModels, activeSes
   const updateSession = useChatStore((s) => s.updateSession);
   const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
   const scopeLabel = activeSession ? t('settings.model.thinkingSessionScope', { name: activeSession.title }) : t('settings.model.thinkingGlobalScope');
+  const promptOptimizerModel = settings.promptOptimizerModel
+    ? availableModels.find((model) => model.provider === settings.promptOptimizerModel?.provider && model.id === settings.promptOptimizerModel?.id) ?? null
+    : null;
 
   const selectThinkingLevel = (level: ThinkingLevel) => {
     const sent = piApi.send({
@@ -958,6 +977,16 @@ function ModelSettings({ currentModel, thinkingLevel, availableModels, activeSes
     }
   };
 
+  const selectPromptOptimizerModel = (value: string) => {
+    if (!value) {
+      settings.updateSetting('promptOptimizerModel', null);
+      return;
+    }
+    const model = modelFromSerializedKey(value, availableModels);
+    if (!model) return;
+    settings.updateSetting('promptOptimizerModel', { provider: model.provider, id: model.id });
+  };
+
   return (
     <div className="max-w-md space-y-6">
       <h2 className="text-sm font-semibold text-pi-text mb-4">{t('settings.model.title')}</h2>
@@ -980,15 +1009,38 @@ function ModelSettings({ currentModel, thinkingLevel, availableModels, activeSes
               key={level}
               onClick={() => selectThinkingLevel(level)}
               className={cn(
-                'px-2.5 py-1 rounded-md text-[10px] font-medium transition-colors',
+                'rounded-md border px-2.5 py-1 text-[10px] font-medium transition-colors',
                 thinkingLevel === level
-                  ? 'bg-pi-accent text-white'
-                  : 'bg-pi-bg-tertiary text-pi-dim hover:text-pi-text border border-pi-border'
+                  ? thinkingLevelPillClass(level, true)
+                  : thinkingLevelPillClass(level)
               )}
             >
               {t(`chat.thinking.${level}` as TranslationKey)}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Prompt optimizer model */}
+      <div className="rounded-lg border border-pi-border bg-pi-bg-secondary p-3">
+        <label className="text-[10px] font-semibold text-pi-dim uppercase">{t('settings.model.promptOptimizerModel')}</label>
+        <p className="mt-1 text-[11px] leading-relaxed text-pi-dim">{t('settings.model.promptOptimizerModelHint')}</p>
+        <select
+          value={promptOptimizerModel ? serializeModelKey(promptOptimizerModel) : ''}
+          onChange={(event) => selectPromptOptimizerModel(event.target.value)}
+          className="mt-3 w-full rounded-md border border-pi-border bg-pi-bg-tertiary px-2.5 py-2 text-xs text-pi-text outline-none transition-colors focus:border-pi-accent"
+        >
+          <option value="">{t('settings.model.promptOptimizerAuto')}</option>
+          {availableModels.map((model) => (
+            <option key={serializeModelKey(model)} value={serializeModelKey(model)}>
+              {model.provider}/{model.name}
+            </option>
+          ))}
+        </select>
+        <div className="mt-2 text-[10px] text-pi-dim">
+          {promptOptimizerModel
+            ? t('settings.model.promptOptimizerSelected', { model: `${promptOptimizerModel.provider}/${promptOptimizerModel.name}` })
+            : t('settings.model.promptOptimizerAutoHint')}
         </div>
       </div>
 

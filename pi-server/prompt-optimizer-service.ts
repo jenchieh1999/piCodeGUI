@@ -1,4 +1,6 @@
 import type { IncomingMessage } from 'node:http';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import path from 'node:path';
 import type { Api, Model, TextContent, UserMessage } from '@earendil-works/pi-ai';
 import { getAuthPath, getModelsPath } from './agent-paths.js';
 import { normalizeProviderModelId } from './model-catalog.js';
@@ -20,10 +22,29 @@ type PromptQualityAssessment = {
   warnings: string[];
 };
 
+type PromptOptimizerSkill = {
+  name: string;
+  instructions: string;
+  sourcePath?: string;
+};
+
 const MAX_PROMPT_OPTIMIZE_CHARS = 12_000;
 const MAX_PROMPT_OPTIMIZE_BODY_CHARS = 80_000;
+const MAX_PROMPT_OPTIMIZER_SKILL_CHARS = 6_000;
+const DEFAULT_FAST_MODEL_TIMEOUT_MS = 6_000;
+const MIN_FAST_MODEL_TIMEOUT_MS = 1_000;
+const MAX_FAST_MODEL_TIMEOUT_MS = 30_000;
 const FAST_MODEL_TIMEOUT_MS = readPromptOptimizerTimeoutMs(process.env.PI_AGENT_PROMPT_OPTIMIZER_TIMEOUT_MS);
 const FAST_MODEL_MAX_TOKENS = 1_400;
+const PROMPT_ENGINEERING_SKILL_NAME = 'prompt-engineering-expert';
+const BUILTIN_PROMPT_ENGINEERING_EXPERT = [
+  'Optimize prompts for AI agents without answering the underlying task.',
+  'Preserve user intent, language, file paths, selected text boundaries, versions, constraints, and sensitive redaction boundaries.',
+  'Turn vague requests into executable instructions with context, constraints, expected output, and verification steps when helpful.',
+  'For code work, make the task safe for an editing agent: inspect first, keep changes scoped, protect user edits, and require validation.',
+  'For research or multi-agent work, require evidence quality, explicit assumptions, comparison dimensions, and a neutral synthesis.',
+  'Keep simple prompts concise; only expand when the task needs structure.',
+].join('\n');
 
 const FAST_MODEL_KEYWORDS = [
   ['nano', 130],
@@ -69,8 +90,66 @@ const AGENT_ROOM_TASK_RE = /(智能体聊天室|多智能体|多 agents|subagent
 
 function readPromptOptimizerTimeoutMs(rawValue: string | undefined): number {
   const parsed = Number(rawValue);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 1_000;
-  return Math.max(500, Math.min(8_000, Math.round(parsed)));
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_FAST_MODEL_TIMEOUT_MS;
+  return Math.max(MIN_FAST_MODEL_TIMEOUT_MS, Math.min(MAX_FAST_MODEL_TIMEOUT_MS, Math.round(parsed)));
+}
+
+function loadPromptOptimizerSkill(input: PromptOptimizeInputData): PromptOptimizerSkill | undefined {
+  if (process.env.PI_AGENT_PROMPT_OPTIMIZER_DISABLE_SKILL === '1') return undefined;
+
+  const explicitName = process.env.PI_AGENT_PROMPT_OPTIMIZER_SKILL?.trim();
+  const explicitPath = process.env.PI_AGENT_PROMPT_OPTIMIZER_SKILL_PATH?.trim();
+  const skillExplicitlyEnabled = Boolean(explicitPath) || normalizeSkillName(explicitName ?? '') === PROMPT_ENGINEERING_SKILL_NAME;
+  if (!skillExplicitlyEnabled) return undefined;
+
+  const candidates: string[] = [];
+  if (explicitPath) candidates.push(explicitPath);
+  if (input.projectPath) {
+    candidates.push(
+      path.join(input.projectPath, '.pi', 'skills', PROMPT_ENGINEERING_SKILL_NAME, 'SKILL.md'),
+      path.join(input.projectPath, '.agents', 'skills', PROMPT_ENGINEERING_SKILL_NAME, 'SKILL.md')
+    );
+  }
+  if (process.env.CODEX_HOME) {
+    candidates.push(path.join(process.env.CODEX_HOME, 'skills', PROMPT_ENGINEERING_SKILL_NAME, 'SKILL.md'));
+  }
+
+  for (const candidate of candidates) {
+    const skill = readPromptOptimizerSkill(candidate);
+    if (skill) return skill;
+  }
+
+  if (explicitName && normalizeSkillName(explicitName) === PROMPT_ENGINEERING_SKILL_NAME) {
+    return {
+      name: PROMPT_ENGINEERING_SKILL_NAME,
+      instructions: BUILTIN_PROMPT_ENGINEERING_EXPERT,
+    };
+  }
+
+  return undefined;
+}
+
+function readPromptOptimizerSkill(filePath: string): PromptOptimizerSkill | undefined {
+  try {
+    const resolved = path.resolve(filePath);
+    if (!existsSync(resolved)) return undefined;
+    const stat = statSync(resolved);
+    if (!stat.isFile() || stat.size > 128 * 1024) return undefined;
+    const content = readFileSync(resolved, 'utf8');
+    const instructions = truncateContext(content, MAX_PROMPT_OPTIMIZER_SKILL_CHARS);
+    if (!instructions.trim()) return undefined;
+    return {
+      name: PROMPT_ENGINEERING_SKILL_NAME,
+      instructions,
+      sourcePath: resolved,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeSkillName(value: string): string {
+  return value.trim().toLowerCase().replace(/^@+/, '');
 }
 
 export async function handlePromptOptimizerRequest(req: IncomingMessage): Promise<PromptOptimizerHttpResponse | null> {
@@ -91,10 +170,12 @@ export async function handlePromptOptimizerRequest(req: IncomingMessage): Promis
   }
 
   try {
-    const modelResult = await optimizeWithFastModel(input, startedAt);
-    const result = finalizePromptOptimization(input, modelResult.optimized, 'model', startedAt, {
+    const skill = loadPromptOptimizerSkill(input);
+    const modelResult = await optimizeWithFastModel(input, startedAt, skill);
+    const result = finalizePromptOptimization(input, modelResult.optimized, skill ? 'skill' : 'model', startedAt, {
       provider: modelResult.provider,
       modelId: modelResult.modelId,
+      skillName: skill?.name,
     });
     if (result.changedIntentRisk === 'high') {
       throw new Error(result.warning ?? 'Optimized prompt dropped important original constraints.');
@@ -107,7 +188,8 @@ export async function handlePromptOptimizerRequest(req: IncomingMessage): Promis
 
 async function optimizeWithFastModel(
   input: PromptOptimizeInputData,
-  startedAt: number
+  startedAt: number,
+  skill?: PromptOptimizerSkill
 ): Promise<PromptOptimizeResultData> {
   const { AuthStorage, ModelRegistry } = await import('@earendil-works/pi-coding-agent');
   const { complete } = await import('@earendil-works/pi-ai');
@@ -128,13 +210,13 @@ async function optimizeWithFastModel(
   try {
     const userMessage: UserMessage = {
       role: 'user',
-      content: [{ type: 'text', text: buildOptimizationUserPrompt(input) }],
+      content: [{ type: 'text', text: buildOptimizationUserPrompt(input, skill) }],
       timestamp: Date.now(),
     };
 
     const response = await complete(
       model,
-      { systemPrompt: MODEL_SYSTEM_PROMPT, messages: [userMessage] },
+      { systemPrompt: buildModelSystemPrompt(skill), messages: [userMessage] },
       {
         apiKey: auth.apiKey,
         headers: auth.headers,
@@ -184,7 +266,7 @@ function finalizePromptOptimization(
   optimized: string,
   source: PromptOptimizeResultData['source'],
   startedAt: number,
-  meta: { provider?: string; modelId?: string; fallbackReason?: string } = {}
+  meta: { provider?: string; modelId?: string; skillName?: string; fallbackReason?: string } = {}
 ): PromptOptimizeResultData {
   const normalized = sanitizeModelPromptOutput(optimized);
   const assessment = assessPromptOptimization(input.text, normalized);
@@ -197,6 +279,7 @@ function finalizePromptOptimization(
     durationMs: Date.now() - startedAt,
     provider: meta.provider,
     modelId: meta.modelId,
+    skillName: meta.skillName,
     warning: warnings[0],
     mode: resolvePromptOptimizeMode(input),
     qualityScore: assessment.score,
@@ -208,6 +291,11 @@ function finalizePromptOptimization(
 
 function selectFastModel(models: SdkModel[], input: PromptOptimizeInputData): SdkModel | null {
   if (models.length === 0) return null;
+
+  const preferred = input.preferredOptimizerModel
+    ? findSdkModel(models, input.preferredOptimizerModel.provider, input.preferredOptimizerModel.id)
+    : null;
+  if (preferred) return preferred;
 
   const explicit = selectExplicitFastModel(models);
   if (explicit) return explicit;
@@ -293,7 +381,19 @@ function scoreFastModel(model: SdkModel): number {
   return score;
 }
 
-function buildOptimizationUserPrompt(input: PromptOptimizeInputData): string {
+function buildModelSystemPrompt(skill?: PromptOptimizerSkill): string {
+  if (!skill) return MODEL_SYSTEM_PROMPT;
+  return [
+    MODEL_SYSTEM_PROMPT,
+    '',
+    '<prompt_optimization_skill>',
+    `name: ${skill.name}`,
+    skill.instructions,
+    '</prompt_optimization_skill>',
+  ].join('\n');
+}
+
+function buildOptimizationUserPrompt(input: PromptOptimizeInputData, skill?: PromptOptimizerSkill): string {
   const language = input.language ?? detectPromptLanguage(input.text);
   const mode = resolvePromptOptimizeMode(input);
   const headline =
@@ -318,11 +418,25 @@ function buildOptimizationUserPrompt(input: PromptOptimizeInputData): string {
     '<context>',
     ...buildOptimizationContextLines(input, mode),
     '</context>',
+  ];
+
+  if (skill) {
+    lines.push(
+      '',
+      '<active_skill>',
+      `name: ${skill.name}`,
+      skill.sourcePath ? `source_path: ${skill.sourcePath}` : 'source_path: builtin',
+      truncateContext(skill.instructions, 1800),
+      '</active_skill>'
+    );
+  }
+
+  lines.push(
     '',
     '<user_prompt>',
     normalizePromptInput(input.text),
-    '</user_prompt>',
-  ];
+    '</user_prompt>'
+  );
 
   return lines.join('\n');
 }
@@ -384,6 +498,9 @@ function buildOptimizationContextLines(input: PromptOptimizeInputData, mode: Pro
 
   if (input.currentModel) {
     lines.push(`current_model: ${input.currentModel.provider}/${input.currentModel.id}`);
+  }
+  if (input.preferredOptimizerModel) {
+    lines.push(`preferred_optimizer_model: ${input.preferredOptimizerModel.provider}/${input.preferredOptimizerModel.id}`);
   }
 
   if (input.sessionContext) {
@@ -457,6 +574,14 @@ function normalizePromptOptimizeInput(value: unknown): PromptOptimizeInputData {
           id: object.currentModel.id,
         }
       : undefined;
+  const preferredOptimizerModel = isRecord(object.preferredOptimizerModel)
+    && typeof object.preferredOptimizerModel.provider === 'string'
+    && typeof object.preferredOptimizerModel.id === 'string'
+      ? {
+          provider: object.preferredOptimizerModel.provider,
+          id: object.preferredOptimizerModel.id,
+        }
+      : undefined;
   const fileReferences = normalizePromptFileReferences(object.fileReferences);
   const imageReferences = normalizePromptImageReferences(object.imageReferences);
   const sessionContext = normalizePromptSessionContext(object.sessionContext);
@@ -477,6 +602,7 @@ function normalizePromptOptimizeInput(value: unknown): PromptOptimizeInputData {
     selectionOnly: object.selectionOnly === true,
     sessionId: stringValue(object.sessionId) ?? undefined,
     currentModel,
+    preferredOptimizerModel,
   };
 }
 

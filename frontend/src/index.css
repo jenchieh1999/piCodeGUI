@@ -239,6 +239,14 @@ body {
   box-shadow: inset 0 1px color-mix(in srgb, white 7%, transparent), 0 6px 24px color-mix(in srgb, black 16%, transparent);
 }
 
+.pi-composer-input-control:focus-within {
+  border-color: var(--pi-accent);
+  box-shadow:
+    inset 0 1px color-mix(in srgb, white 7%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--pi-accent) 70%, transparent),
+    0 6px 24px color-mix(in srgb, black 16%, transparent);
+}
+
 .pi-glass-menu {
   background: color-mix(in srgb, var(--pi-bg-secondary) 92%, transparent);
   border: 1px solid var(--pi-hairline);
@@ -426,6 +434,73 @@ code, pre {
   text-align: left;
 }
 .markdown-body th { background: var(--pi-bg-tertiary); font-weight: 600; }
+
+/* Agents room reading density */
+.agent-room-markdown {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.agent-room-markdown .markdown-body {
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.agent-room-markdown-compact .markdown-body {
+  font-size: 11.5px;
+  line-height: 1.58;
+}
+.agent-room-markdown .markdown-body > :first-child {
+  margin-top: 0;
+}
+.agent-room-markdown .markdown-body > :last-child {
+  margin-bottom: 0;
+}
+.agent-room-markdown .markdown-body h1,
+.agent-room-markdown .markdown-body h2,
+.agent-room-markdown .markdown-body h3,
+.agent-room-markdown .markdown-body h4,
+.agent-room-markdown .markdown-body h5,
+.agent-room-markdown .markdown-body h6 {
+  margin: 0.7em 0 0.35em;
+  line-height: 1.28;
+}
+.agent-room-markdown .markdown-body h1 { font-size: 1.18em; }
+.agent-room-markdown .markdown-body h2 { font-size: 1.1em; }
+.agent-room-markdown .markdown-body h3 { font-size: 1.04em; }
+.agent-room-markdown .markdown-body p {
+  margin: 0.45em 0;
+}
+.agent-room-markdown .markdown-body ul,
+.agent-room-markdown .markdown-body ol {
+  margin: 0.4em 0;
+  padding-left: 1.25em;
+}
+.agent-room-markdown .markdown-body li {
+  margin: 0.18em 0;
+}
+.agent-room-markdown .markdown-body blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.75em;
+}
+.agent-room-markdown .markdown-body pre {
+  margin: 0.55em 0;
+  padding: 0.75em;
+  border-radius: 8px;
+}
+.agent-room-markdown .markdown-body pre code {
+  font-size: 0.82em;
+  line-height: 1.58;
+}
+.agent-room-markdown .markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: 0.92em;
+}
+.agent-room-markdown .markdown-body th,
+.agent-room-markdown .markdown-body td {
+  padding: 0.35em 0.55em;
+}
 
 .pi-search-highlight {
   background: color-mix(in srgb, var(--pi-warning) 45%, transparent);

@@ -41,6 +41,7 @@ import { getSlashCommands } from './slash-commands.js';
 import { createChannelService } from './channel-service.js';
 import { handleAgentRequest, listAgents } from './agent-service.js';
 import { createAgentRoomService } from './agent-room-service.js';
+import { handleWebSearchRequest } from './web-search-service.js';
 import { captureRuntimeFailureLearning, maybeCaptureUserLearning, prepareAgentOrchestrationPrompt } from './agent-orchestration-service.js';
 import { loadPermissionAudit, loadPermissionRules } from './permission-store.js';
 import { TerminalService } from './terminal-service.js';
@@ -135,6 +136,15 @@ const httpServer = createServer(async (req, res) => {
   const agentRoomResponse = await agentRoomService.handleRequest(req);
   if (agentRoomResponse) {
     writeJson(res, req, agentRoomResponse.status, agentRoomResponse.body);
+    return;
+  }
+
+  const webSearchResponse = await handleWebSearchRequest(req).catch((err) => ({
+    status: 500,
+    body: { error: err instanceof Error ? err.message : String(err) },
+  }));
+  if (webSearchResponse) {
+    writeJson(res, req, webSearchResponse.status, webSearchResponse.body);
     return;
   }
 
@@ -384,11 +394,27 @@ wss.on('connection', async (ws: WebSocket) => {
           break;
         }
 
-        // Abort any previous response for this session
         const prevCtrl = activeResponses.get(msg.sessionId);
         if (prevCtrl) {
-          prevCtrl.abort();
-          transcriptRecorder.completeInterrupted(msg.sessionId);
+          try {
+            await applySessionRuntimeConfig(runtime, session, providerCatalog, selectedModel);
+            transcriptRecorder.recordUserPrompt(msg.sessionId, msg.message, msg.images);
+            maybeCaptureUserLearning(session, msg.message, listAgents());
+            sendAutoTitleUpdate(msg.sessionId, sendToClient);
+            const orchestration = prepareAgentOrchestrationPrompt({
+              session,
+              message: msg.message,
+              agents: listAgents(),
+            });
+            if (!runtime.followUp) {
+              throw new Error('Current runtime does not support queued follow-up prompts.');
+            }
+            await runtime.followUp(msg.sessionId, orchestration.message, msg.images);
+          } catch (err: any) {
+            captureRuntimeFailureLearning(session, err);
+            sendError(ws, err.message, msg.sessionId);
+          }
+          break;
         }
 
         const abortController = new AbortController();
@@ -718,7 +744,7 @@ function writeJson(
   headers: Record<string, string> = {},
 ): void {
   res.writeHead(status, {
-    'Content-Type': 'application/json',
+    'Content-Type': 'application/json; charset=utf-8',
     ...headers,
     ...securityHeaders(req),
   });

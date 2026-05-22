@@ -4,6 +4,8 @@
 
 import type {
   AgentRoomCreateInput,
+  AgentRoomInterventionInput,
+  AgentRoomInterventionResult,
   AgentRoomSnapshot,
   AgentConfig,
   AgentInput,
@@ -1015,6 +1017,14 @@ class PiApiClient {
       run: AgentRoomSnapshot['runsByRoom'][string][number];
     }>(`/api/agent-rooms/${encodeURIComponent(roomId)}/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
+    });
+  }
+
+  async createAgentRoomIntervention(roomId: string, input: AgentRoomInterventionInput) {
+    return this.request<AgentRoomInterventionResult>(`/api/agent-rooms/${encodeURIComponent(roomId)}/interventions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
     });
   }
 

@@ -17,6 +17,7 @@ const DEFAULT: AppSettings = {
   rightPanelType: null,
   showThinking: true,
   compactOnOverflow: true,
+  promptOptimizerModel: null,
   chatBackgroundImage: '',
   chatBackgroundDim: 58,
 };

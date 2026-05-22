@@ -3,17 +3,16 @@ import { useChatStore } from './stores/chatStore';
 import { useExtensionStore, useUIStore, useSettingsStore } from './stores';
 import { piApi } from './api/client';
 import { AppShell } from './components/layout/AppShell';
-import { ChatView } from './components/chat/ChatView';
 import { EmptyState } from './components/shared/EmptyState';
 import { DesktopTitleBar } from './components/desktop/DesktopTitleBar';
 import { ProjectLauncher } from './components/shared/ProjectLauncher';
-import { WorkspaceQuickOpen } from './components/workspace/WorkspaceQuickOpen';
 import { applyRuntimeSettings } from './lib/runtimeSettings';
 import { createNewSessionFromPicker, OPEN_PROJECTS_EVENT } from './lib/sessionActions';
 import { useI18n } from './lib/i18n';
 import { useScheduledTaskRunner } from './hooks/useScheduledTaskRunner';
 import { FolderOpen, Loader2, RotateCcw, X } from 'lucide-react';
 
+const ChatView = lazy(() => import('./components/chat/ChatView').then((m) => ({ default: m.ChatView })));
 const SettingsView = lazy(() => import('./components/settings/SettingsView').then((m) => ({ default: m.SettingsView })));
 const PackagesView = lazy(() => import('./components/settings/PackagesView').then((m) => ({ default: m.PackagesView })));
 const ThemeEditor = lazy(() => import('./components/settings/ThemeEditor').then((m) => ({ default: m.ThemeEditor })));
@@ -27,6 +26,7 @@ const MarkdownStandaloneView = lazy(() => import('./components/markdown/Markdown
 const WorkspaceFileStandaloneView = lazy(() => import('./components/workspace/WorkspaceFileStandaloneView').then((m) => ({ default: m.WorkspaceFileStandaloneView })));
 const TerminalStandaloneView = lazy(() => import('./components/terminal/TerminalStandaloneView').then((m) => ({ default: m.TerminalStandaloneView })));
 const StandaloneTabsView = lazy(() => import('./components/standalone/StandaloneTabsView').then((m) => ({ default: m.StandaloneTabsView })));
+const WorkspaceQuickOpen = lazy(() => import('./components/workspace/WorkspaceQuickOpen').then((m) => ({ default: m.WorkspaceQuickOpen })));
 
 export default function App() {
   switch (desktopViewRoute()) {
