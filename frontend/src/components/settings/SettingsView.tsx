@@ -3,19 +3,22 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useModelStore } from '../../stores/modelStore';
 import { useExtensionStore } from '../../stores/extensionStore';
 import { useUIStore } from '../../stores/uiStore';
+import { useChatStore } from '../../stores/chatStore';
 import { piApi } from '../../api/client';
 import { ChannelsSettings } from './ChannelsSettings';
 import type {
   AuthProviderStatus,
   AuthProviderTestResult,
   AuthStatusResult,
+  ModelInfo,
   PermissionAuditEntry,
   PermissionRule,
   PiTheme,
+  Session,
   ThinkingLevel,
 } from '../../types';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
-import { listRuntimeThemes, themeDisplayName } from '../../lib/runtimeSettings';
+import { groupRuntimeThemesBySeries, listRuntimeThemes, themeDisplayName } from '../../lib/runtimeSettings';
 import {
   Monitor,
   Shield,
@@ -29,6 +32,7 @@ import {
   Palette,
   Trash2,
   KeyRound,
+  Search,
   RefreshCw,
   Save,
   XCircle,
@@ -40,6 +44,7 @@ import {
   ShieldCheck,
   PlugZap,
   RadioTower,
+  ExternalLink,
 } from 'lucide-react';
 import { cn } from '../shared/utils';
 
@@ -63,6 +68,7 @@ const UI_FONT_PRESETS = [
 ] as const;
 
 const MONO_FONT_PRESETS = [
+  { label: 'SF Mono / Cascadia', value: "'SF Mono', 'SFMono-Regular', ui-monospace, 'Cascadia Code', 'Cascadia Mono', Menlo, Monaco, Consolas, monospace" },
   { label: 'JetBrains Mono', value: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace" },
   { label: 'Cascadia Code', value: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace" },
   { label: 'Fira Code', value: "'Fira Code', 'JetBrains Mono', Consolas, monospace" },
@@ -79,6 +85,12 @@ export function SettingsView() {
   const currentModel = useModelStore((s) => s.currentModel);
   const thinkingLevel = useModelStore((s) => s.thinkingLevel);
   const availableModels = useModelStore((s) => s.availableModels);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === activeSessionId));
+  const effectiveCurrentModel = useMemo(
+    () => activeSession ? modelForSession(activeSession, availableModels, currentModel) : currentModel,
+    [activeSession, availableModels, currentModel]
+  );
   const themes = useExtensionStore((s) => s.themes);
   const customThemes = useExtensionStore((s) => s.customThemes);
 
@@ -91,9 +103,10 @@ export function SettingsView() {
       case 'model':
         return (
           <ModelSettings
-            currentModel={currentModel}
-            thinkingLevel={thinkingLevel}
+            currentModel={effectiveCurrentModel}
+            thinkingLevel={activeSession?.thinkingLevel ?? thinkingLevel}
             availableModels={availableModels}
+            activeSessionId={activeSessionId}
           />
         );
       case 'credentials':
@@ -156,6 +169,7 @@ export function SettingsView() {
 
 function GeneralSettings() {
   const settings = useSettingsStore();
+  const addToast = useUIStore((s) => s.addToast);
   const { t } = useI18n();
   const [fontSizeDraft, setFontSizeDraft] = useState(settings.fontSize);
   const [fontFamilyDraft, setFontFamilyDraft] = useState(settings.fontFamily);
@@ -309,6 +323,8 @@ function GeneralSettings() {
             onClick={() => {
               if (confirm(t('settings.general.resetConfirm'))) {
                 settings.resetSettings();
+                piApi.send({ type: 'theme_set', name: 'dark' });
+                addToast({ type: 'success', message: t('settings.appearance.settingsReset') });
               }
             }}
             className="flex items-center gap-2 px-3 py-1.5 rounded-md text-xs text-pi-error
@@ -877,14 +893,70 @@ function formatTime(timestamp: number): string {
 }
 
 interface ModelSettingsProps {
-  currentModel: { id: string; name: string; provider: string } | null;
+  currentModel: ModelInfo | null;
   thinkingLevel: ThinkingLevel;
-  availableModels: Array<{ id: string; name: string; provider: string }>;
+  availableModels: ModelInfo[];
+  activeSessionId: string | null;
 }
 
-function ModelSettings({ currentModel, thinkingLevel, availableModels }: ModelSettingsProps) {
+function modelForSession(session: Session, models: ModelInfo[], fallback: ModelInfo | null): ModelInfo | null {
+  const provider = session.modelProvider;
+  return models.find((model) => model.id === session.modelId && (!provider || model.provider === provider))
+    ?? models.find((model) => model.id === session.modelId)
+    ?? fallback;
+}
+
+function ModelSettings({ currentModel, thinkingLevel, availableModels, activeSessionId }: ModelSettingsProps) {
   const { t } = useI18n();
+  const addToast = useUIStore((s) => s.addToast);
+  const setCurrentModel = useModelStore((s) => s.setCurrentModel);
+  const setGlobalThinkingLevel = useModelStore((s) => s.setThinkingLevel);
+  const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === activeSessionId));
+  const updateSession = useChatStore((s) => s.updateSession);
   const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  const scopeLabel = activeSession ? t('settings.model.thinkingSessionScope', { name: activeSession.title }) : t('settings.model.thinkingGlobalScope');
+
+  const selectThinkingLevel = (level: ThinkingLevel) => {
+    const sent = piApi.send({
+      type: 'set_thinking_level',
+      sessionId: activeSessionId ?? undefined,
+      level,
+    });
+    if (!sent) {
+      addToast({ type: 'error', message: t('chat.switchThinkingDisconnected') });
+      return;
+    }
+
+    if (activeSession) {
+      updateSession({ ...activeSession, thinkingLevel: level, updatedAt: Date.now() });
+    } else {
+      setGlobalThinkingLevel(level);
+    }
+  };
+
+  const selectModel = (model: ModelInfo) => {
+    const sent = piApi.send({
+      type: 'set_model',
+      sessionId: activeSessionId ?? undefined,
+      modelId: model.id,
+      provider: model.provider,
+    });
+    if (!sent) {
+      addToast({ type: 'error', message: t('chat.switchModelDisconnected') });
+      return;
+    }
+
+    if (activeSession) {
+      updateSession({
+        ...activeSession,
+        modelProvider: model.provider,
+        modelId: model.id,
+        updatedAt: Date.now(),
+      });
+    } else {
+      setCurrentModel(model);
+    }
+  };
 
   return (
     <div className="max-w-md space-y-6">
@@ -901,11 +973,12 @@ function ModelSettings({ currentModel, thinkingLevel, availableModels }: ModelSe
       {/* Thinking Level */}
       <div>
         <label className="text-[10px] font-semibold text-pi-dim uppercase">{t('settings.model.thinkingLevel')}</label>
+        <div className="mt-1 text-[10px] text-pi-dim">{scopeLabel}</div>
         <div className="mt-1 flex gap-1">
           {thinkingLevels.map((level) => (
             <button
               key={level}
-              onClick={() => piApi.send({ type: 'set_thinking_level', level })}
+              onClick={() => selectThinkingLevel(level)}
               className={cn(
                 'px-2.5 py-1 rounded-md text-[10px] font-medium transition-colors',
                 thinkingLevel === level
@@ -928,7 +1001,7 @@ function ModelSettings({ currentModel, thinkingLevel, availableModels }: ModelSe
           {availableModels.slice(0, 20).map((model) => (
             <button
               key={`${model.provider}/${model.id}`}
-              onClick={() => piApi.send({ type: 'set_model', modelId: model.id, provider: model.provider })}
+              onClick={() => selectModel(model)}
               className={cn(
                 'w-full text-left px-2.5 py-1.5 rounded-md text-xs transition-colors',
                 currentModel?.id === model.id && currentModel?.provider === model.provider
@@ -953,19 +1026,26 @@ function CredentialsSettings() {
   const addToast = useUIStore((s) => s.addToast);
   const [status, setStatus] = useState<AuthStatusResult | null>(null);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<CredentialFilter>('all');
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busyProvider, setBusyProvider] = useState<string | null>(null);
   const [testingProvider, setTestingProvider] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, AuthProviderTestResult>>({});
   const [error, setError] = useState<string | null>(null);
 
+  const applyAuthStatus = useCallback((next: AuthStatusResult) => {
+    setStatus(next);
+    setBaseUrls(Object.fromEntries(next.providers.map((provider) => [provider.id, provider.baseUrl ?? ''])));
+  }, []);
+
   const loadStatus = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setStatus(await piApi.getAuthStatus());
+      applyAuthStatus(await piApi.getAuthStatus());
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -973,7 +1053,7 @@ function CredentialsSettings() {
     } finally {
       setLoading(false);
     }
-  }, [addToast, t]);
+  }, [addToast, applyAuthStatus, t]);
 
   useEffect(() => {
     void loadStatus();
@@ -986,7 +1066,15 @@ function CredentialsSettings() {
         if (filter === 'configured' && !provider.configured) return false;
         if (filter === 'available' && provider.availableModels === 0) return false;
         if (!query) return true;
-        return `${provider.name} ${provider.id} ${provider.label ?? ''}`.toLowerCase().includes(query);
+        return [
+          provider.name,
+          provider.id,
+          provider.label,
+          provider.baseUrl,
+          provider.defaultBaseUrl,
+          provider.docsUrl,
+          ...(provider.aliases ?? []),
+        ].filter(Boolean).join(' ').toLowerCase().includes(query);
       })
       .sort((a, b) => {
         const configuredDelta = Number(b.configured) - Number(a.configured);
@@ -997,8 +1085,20 @@ function CredentialsSettings() {
       });
   }, [filter, search, status?.providers]);
 
+  useEffect(() => {
+    if (providers.length === 0) {
+      setSelectedProviderId(null);
+      return;
+    }
+    if (!selectedProviderId || !providers.some((provider) => provider.id === selectedProviderId)) {
+      setSelectedProviderId(providers[0]!.id);
+    }
+  }, [providers, selectedProviderId]);
+
+  const selectedProvider = providers.find((provider) => provider.id === selectedProviderId) ?? providers[0] ?? null;
   const configuredCount = status?.providers.filter((provider) => provider.configured).length ?? 0;
   const availableCount = status?.providers.filter((provider) => provider.availableModels > 0).length ?? 0;
+  const proxyCount = status?.providers.filter((provider) => provider.baseUrl).length ?? 0;
 
   const saveApiKey = async (provider: AuthProviderStatus) => {
     const apiKey = apiKeys[provider.id]?.trim() ?? '';
@@ -1010,7 +1110,7 @@ function CredentialsSettings() {
     setBusyProvider(provider.id);
     try {
       const next = await piApi.saveProviderApiKey(provider.id, apiKey);
-      setStatus(next);
+      applyAuthStatus(next);
       setApiKeys((current) => ({ ...current, [provider.id]: '' }));
       piApi.send({ type: 'auth_refresh' });
       addToast({ type: 'success', message: t('settings.credentials.saved', { provider: provider.name }) });
@@ -1025,13 +1125,47 @@ function CredentialsSettings() {
   const removeApiKey = async (provider: AuthProviderStatus) => {
     setBusyProvider(provider.id);
     try {
-      setStatus(await piApi.removeProviderApiKey(provider.id));
+      applyAuthStatus(await piApi.removeProviderApiKey(provider.id));
       setApiKeys((current) => ({ ...current, [provider.id]: '' }));
       piApi.send({ type: 'auth_refresh' });
       addToast({ type: 'success', message: t('settings.credentials.removed', { provider: provider.name }) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       addToast({ type: 'error', message: t('settings.credentials.removeFailed', { provider: provider.name, message }) });
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const saveProviderEndpoint = async (provider: AuthProviderStatus) => {
+    const baseUrl = baseUrls[provider.id]?.trim() ?? '';
+    setBusyProvider(`config:${provider.id}`);
+    try {
+      applyAuthStatus(await piApi.saveProviderConfig(provider.id, baseUrl));
+      piApi.send({ type: 'auth_refresh' });
+      addToast({
+        type: 'success',
+        message: baseUrl
+          ? t('settings.credentials.endpointSaved', { provider: provider.name })
+          : t('settings.credentials.endpointCleared', { provider: provider.name }),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addToast({ type: 'error', message: t('settings.credentials.endpointFailed', { provider: provider.name, message }) });
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  const clearProviderEndpoint = async (provider: AuthProviderStatus) => {
+    setBusyProvider(`config:${provider.id}`);
+    try {
+      applyAuthStatus(await piApi.removeProviderConfig(provider.id));
+      piApi.send({ type: 'auth_refresh' });
+      addToast({ type: 'success', message: t('settings.credentials.endpointCleared', { provider: provider.name }) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addToast({ type: 'error', message: t('settings.credentials.endpointFailed', { provider: provider.name, message }) });
     } finally {
       setBusyProvider(null);
     }
@@ -1056,205 +1190,410 @@ function CredentialsSettings() {
   };
 
   return (
-    <div className="max-w-3xl space-y-5">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-pi-text">{t('settings.credentials.title')}</h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-pi-dim">
-            <span>{t('settings.credentials.configured', { count: configuredCount })}</span>
-            <span className="h-1 w-1 rounded-full bg-pi-border" />
-            <span>{t('settings.credentials.available', { count: availableCount })}</span>
-            {loading && <span>{t('settings.credentials.refreshing')}</span>}
-          </div>
+    <div className="mx-auto max-w-6xl space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-display font-semibold text-pi-text">{t('settings.credentials.title')}</h2>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-pi-dim">{t('settings.credentials.appleHint')}</p>
         </div>
         <button
           onClick={() => void loadStatus()}
           disabled={loading}
-          className="w-8 h-8 rounded-md border border-pi-border text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover disabled:opacity-50 flex items-center justify-center transition-colors"
+          className="flex h-8 items-center gap-1.5 rounded-full border border-pi-border bg-pi-bg-secondary px-3 text-xs font-medium text-pi-muted shadow-sm transition-colors hover:bg-pi-bg-hover hover:text-pi-text disabled:opacity-50"
           title={t('settings.credentials.refresh')}
         >
-          <RefreshCw size={14} className={cn(loading && 'animate-spin')} />
+          <RefreshCw size={13} className={cn(loading && 'animate-spin')} />
+          {loading ? t('settings.credentials.refreshing') : t('settings.credentials.refresh')}
         </button>
       </div>
 
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder={t('settings.credentials.search')}
-          className="h-8 flex-1 rounded-md bg-pi-bg-tertiary border border-pi-border px-3 text-xs text-pi-text placeholder:text-pi-dim"
-        />
-        <div className="flex h-8 rounded-md border border-pi-border overflow-hidden">
-          {(['all', 'configured', 'available'] as const).map((value) => (
-            <button
-              key={value}
-              onClick={() => setFilter(value)}
-              className={cn(
-                'px-3 text-[10px] font-medium capitalize border-r border-pi-border last:border-r-0 transition-colors',
-                filter === value
-                  ? 'bg-pi-selected-bg text-pi-accent'
-                  : 'bg-pi-bg-tertiary text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover'
-              )}
-            >
-              {t(`settings.credentials.filter.${value}` as TranslationKey)}
-            </button>
-          ))}
-        </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <CredentialMetric label={t('settings.credentials.configured', { count: configuredCount })} value={configuredCount} tone="success" />
+        <CredentialMetric label={t('settings.credentials.available', { count: availableCount })} value={availableCount} tone="accent" />
+        <CredentialMetric label={t('settings.credentials.proxies', { count: proxyCount })} value={proxyCount} tone="muted" />
       </div>
 
       {error && (
-        <div className="rounded-md border border-pi-error/30 bg-pi-error/10 px-3 py-2 text-xs text-pi-error">
+        <div className="rounded-xl border border-pi-error/30 bg-pi-error/10 px-3 py-2 text-xs text-pi-error">
           {error}
         </div>
       )}
 
-      <div className="space-y-2">
-        {providers.map((provider) => (
-          <ProviderCredentialRow
-            key={provider.id}
-            provider={provider}
-            apiKey={apiKeys[provider.id] ?? ''}
-            busy={busyProvider === provider.id}
-            testing={testingProvider === provider.id}
-            testResult={testResults[provider.id]}
-            onApiKeyChange={(apiKey) => setApiKeys((current) => ({ ...current, [provider.id]: apiKey }))}
-            onSave={() => void saveApiKey(provider)}
-            onRemove={() => void removeApiKey(provider)}
-            onTest={() => void testProvider(provider)}
-          />
-        ))}
+      {status?.modelsJsonError && (
+        <div className="rounded-xl border border-pi-warning/30 bg-pi-warning/10 px-3 py-2 text-xs text-pi-warning">
+          {t('settings.credentials.modelsJsonError', { message: status.modelsJsonError })}
+        </div>
+      )}
 
-        {!loading && providers.length === 0 && (
-          <div className="rounded-md border border-pi-border bg-pi-bg-secondary px-4 py-6 text-center text-xs text-pi-dim">
-            {t('settings.credentials.noProviders')}
-          </div>
-        )}
+      <div className="grid min-h-[560px] overflow-hidden rounded-2xl border border-pi-border bg-pi-bg-secondary shadow-[0_22px_80px_color-mix(in_srgb,var(--pi-bg)_60%,transparent)] lg:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="min-h-0 border-b border-pi-border bg-pi-bg-secondary/70 lg:border-b-0 lg:border-r">
+          <div className="sticky top-0 z-10 space-y-3 border-b border-pi-border bg-pi-bg-secondary/95 p-3 backdrop-blur-xl">
+            <div className="relative">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-pi-dim" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={t('settings.credentials.search')}
+                className="h-9 w-full rounded-full border border-pi-border bg-pi-bg-tertiary pl-8 pr-3 text-xs text-pi-text placeholder:text-pi-dim focus:border-pi-accent focus:outline-none"
+              />
+            </div>
 
-        {loading && !status && (
-          <div className="rounded-md border border-pi-border bg-pi-bg-secondary px-4 py-6 flex items-center justify-center gap-2 text-xs text-pi-dim">
-            <Loader2 size={14} className="animate-spin" />
-            {t('settings.credentials.loadingProviders')}
+            <div className="flex h-8 overflow-hidden rounded-full border border-pi-border bg-pi-bg-tertiary p-0.5">
+              {(['all', 'configured', 'available'] as const).map((value) => (
+                <button
+                  key={value}
+                  onClick={() => setFilter(value)}
+                  className={cn(
+                    'flex-1 rounded-full px-2 text-[10px] font-semibold transition-colors',
+                    filter === value
+                      ? 'bg-pi-bg-secondary text-pi-text shadow-sm'
+                      : 'text-pi-muted hover:text-pi-text'
+                  )}
+                >
+                  {t(`settings.credentials.filter.${value}` as TranslationKey)}
+                </button>
+              ))}
+            </div>
           </div>
-        )}
+
+          <div className="max-h-[520px] space-y-1 overflow-y-auto p-2">
+            {providers.map((provider) => (
+              <ProviderListItem
+                key={provider.id}
+                provider={provider}
+                active={selectedProvider?.id === provider.id}
+                testResult={testResults[provider.id]}
+                onClick={() => setSelectedProviderId(provider.id)}
+              />
+            ))}
+
+            {!loading && providers.length === 0 && (
+              <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-pi-border px-4 text-center text-xs text-pi-dim">
+                {t('settings.credentials.noProviders')}
+              </div>
+            )}
+
+            {loading && !status && (
+              <div className="flex h-40 items-center justify-center gap-2 rounded-xl border border-pi-border bg-pi-bg-tertiary text-xs text-pi-dim">
+                <Loader2 size={14} className="animate-spin" />
+                {t('settings.credentials.loadingProviders')}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <main className="min-h-0 overflow-y-auto bg-pi-bg/35 p-4 lg:p-5">
+          {selectedProvider ? (
+            <ProviderCredentialDetails
+              provider={selectedProvider}
+              apiKey={apiKeys[selectedProvider.id] ?? ''}
+              baseUrl={baseUrls[selectedProvider.id] ?? ''}
+              busy={busyProvider === selectedProvider.id}
+              endpointBusy={busyProvider === `config:${selectedProvider.id}`}
+              testing={testingProvider === selectedProvider.id}
+              testResult={testResults[selectedProvider.id]}
+              onApiKeyChange={(apiKey) => setApiKeys((current) => ({ ...current, [selectedProvider.id]: apiKey }))}
+              onBaseUrlChange={(baseUrl) => setBaseUrls((current) => ({ ...current, [selectedProvider.id]: baseUrl }))}
+              onSave={() => void saveApiKey(selectedProvider)}
+              onRemove={() => void removeApiKey(selectedProvider)}
+              onSaveEndpoint={() => void saveProviderEndpoint(selectedProvider)}
+              onClearEndpoint={() => void clearProviderEndpoint(selectedProvider)}
+              onTest={() => void testProvider(selectedProvider)}
+            />
+          ) : (
+            <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-3 text-center text-pi-dim">
+              <KeyRound size={30} strokeWidth={1.3} />
+              <div className="max-w-xs text-xs leading-relaxed">{t('settings.credentials.noSelection')}</div>
+            </div>
+          )}
+        </main>
       </div>
     </div>
   );
 }
 
-interface ProviderCredentialRowProps {
+function CredentialMetric({ label, value, tone }: { label: string; value: number; tone: 'success' | 'accent' | 'muted' }) {
+  return (
+    <div className="rounded-2xl border border-pi-border bg-pi-bg-secondary px-4 py-3">
+      <div className={cn(
+        'text-xl font-semibold',
+        tone === 'success' ? 'text-pi-success' : tone === 'accent' ? 'text-pi-accent' : 'text-pi-text'
+      )}>
+        {value}
+      </div>
+      <div className="mt-0.5 text-[10px] text-pi-dim">{label}</div>
+    </div>
+  );
+}
+
+function ProviderListItem({
+  provider,
+  active,
+  testResult,
+  onClick,
+}: {
+  provider: AuthProviderStatus;
+  active: boolean;
+  testResult?: AuthProviderTestResult;
+  onClick: () => void;
+}) {
+  const { t } = useI18n();
+  const statusTone = provider.configured ? 'text-pi-success' : testResult && !testResult.ok ? 'text-pi-warning' : 'text-pi-dim';
+
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'group w-full rounded-xl px-3 py-2.5 text-left transition-colors',
+        active ? 'bg-pi-selected-bg text-pi-text shadow-sm' : 'text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
+      )}
+    >
+      <div className="flex items-center gap-3">
+        <div className={cn(
+          'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border',
+          provider.configured
+            ? 'border-pi-success/25 bg-pi-success/10 text-pi-success'
+            : 'border-pi-border bg-pi-bg-tertiary text-pi-dim'
+        )}>
+          <KeyRound size={14} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-xs font-semibold text-pi-text">{provider.name}</span>
+            {provider.baseUrl && (
+              <span className="rounded-full bg-pi-accent/10 px-1.5 py-0.5 text-[9px] font-semibold text-pi-accent">
+                {t('settings.credentials.proxyBadge')}
+              </span>
+            )}
+          </div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-pi-dim">
+            <span>{t('settings.credentials.models', { available: provider.availableModels, total: provider.models })}</span>
+            <span className="h-1 w-1 rounded-full bg-pi-border" />
+            <span className={statusTone}>
+              {provider.configured ? t('settings.credentials.configuredBadge') : t('settings.credentials.missingBadge')}
+            </span>
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+interface ProviderCredentialDetailsProps {
   provider: AuthProviderStatus;
   apiKey: string;
+  baseUrl: string;
   busy: boolean;
+  endpointBusy: boolean;
   testing: boolean;
   testResult?: AuthProviderTestResult;
   onApiKeyChange: (apiKey: string) => void;
+  onBaseUrlChange: (baseUrl: string) => void;
   onSave: () => void;
   onRemove: () => void;
+  onSaveEndpoint: () => void;
+  onClearEndpoint: () => void;
   onTest: () => void;
 }
 
-function ProviderCredentialRow({
+function ProviderCredentialDetails({
   provider,
   apiKey,
+  baseUrl,
   busy,
+  endpointBusy,
   testing,
   testResult,
   onApiKeyChange,
+  onBaseUrlChange,
   onSave,
   onRemove,
+  onSaveEndpoint,
+  onClearEndpoint,
   onTest,
-}: ProviderCredentialRowProps) {
+}: ProviderCredentialDetailsProps) {
   const { t } = useI18n();
+  const endpointChanged = baseUrl.trim() !== (provider.baseUrl ?? '');
+  const endpointPlaceholder = provider.defaultBaseUrl ?? t('settings.credentials.baseUrlPlaceholder');
+  const endpointDisplay = provider.baseUrl || provider.defaultBaseUrl || t('settings.credentials.noEndpoint');
 
   return (
-    <div className="rounded-lg border border-pi-border bg-pi-bg-secondary p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-medium text-pi-text truncate">{provider.name}</span>
-            <span className="rounded px-1.5 py-0.5 text-[9px] font-mono bg-pi-bg-tertiary text-pi-dim">
-              {provider.id}
-            </span>
+    <div className="mx-auto max-w-3xl space-y-4">
+      <section className="rounded-2xl border border-pi-border bg-pi-bg-secondary p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className={cn(
+              'flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl border',
+              provider.configured
+                ? 'border-pi-success/25 bg-pi-success/10 text-pi-success'
+                : 'border-pi-border bg-pi-bg-tertiary text-pi-dim'
+            )}>
+              <KeyRound size={18} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="truncate text-base font-display font-semibold text-pi-text">{provider.name}</h3>
+                <span className="rounded-full bg-pi-bg-tertiary px-2 py-0.5 font-mono text-[10px] text-pi-dim">
+                  {provider.id}
+                </span>
+                {provider.baseUrl && (
+                  <span className="rounded-full bg-pi-accent/10 px-2 py-0.5 text-[10px] font-semibold text-pi-accent">
+                    {t('settings.credentials.proxyBadge')}
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-pi-dim">
+                <span>{t('settings.credentials.modelsAvailable', { available: provider.availableModels, total: provider.models })}</span>
+                {provider.source && <span>{provider.source}</span>}
+                {provider.label && <span>{provider.label}</span>}
+              </div>
+            </div>
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-pi-dim">
-            <span>{t('settings.credentials.models', { available: provider.availableModels, total: provider.models })}</span>
-            {provider.source && <span>{provider.source}</span>}
-            {provider.label && <span>{provider.label}</span>}
+          <div
+            className={cn(
+              'flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[10px] font-semibold',
+              provider.configured
+                ? 'bg-pi-success/10 text-pi-success'
+                : 'bg-pi-bg-tertiary text-pi-muted'
+            )}
+          >
+            {provider.configured ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+            {provider.configured ? t('settings.credentials.connected') : t('settings.credentials.notConnected')}
           </div>
         </div>
-        <div
-          className={cn(
-            'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium',
-            provider.configured
-              ? 'bg-pi-success/10 text-pi-success'
-              : 'bg-pi-bg-tertiary text-pi-muted'
-          )}
-        >
-          {provider.configured ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
-          {provider.configured ? t('settings.credentials.configuredBadge') : t('settings.credentials.missingBadge')}
-        </div>
-      </div>
 
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <input
-          value={apiKey}
-          onChange={(event) => onApiKeyChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') onSave();
-          }}
-          type="password"
-          placeholder={t('settings.credentials.apiKeyPlaceholder')}
-          disabled={busy}
-          className="h-8 min-w-0 flex-1 rounded-md bg-pi-bg-tertiary border border-pi-border px-3 text-xs text-pi-text placeholder:text-pi-dim disabled:opacity-50"
-        />
-        <div className="flex gap-2">
-          <button
-            onClick={onSave}
-            disabled={busy}
-            className="h-8 px-3 rounded-md bg-pi-accent text-white text-xs font-medium flex items-center gap-1.5 hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-            {t('common.save')}
-          </button>
-          <button
-            onClick={onTest}
-            disabled={busy || testing}
-            className="h-8 px-3 rounded-md border border-pi-border text-xs text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover disabled:opacity-50 transition-colors flex items-center gap-1.5"
-          >
-            {testing ? <Loader2 size={13} className="animate-spin" /> : <PlugZap size={13} />}
-            {t('common.test')}
-          </button>
-          <button
-            onClick={onRemove}
-            disabled={busy || !provider.configured}
-            className="h-8 px-3 rounded-md border border-pi-border text-xs text-pi-muted hover:text-pi-error hover:border-pi-error/40 disabled:opacity-50 disabled:hover:text-pi-muted disabled:hover:border-pi-border transition-colors"
-          >
-            {t('settings.credentials.remove')}
-          </button>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <CredentialInfoRow label={t('settings.credentials.currentEndpoint')} value={endpointDisplay} mono />
+          <CredentialInfoRow label={t('settings.credentials.modelsAvailable', { available: provider.availableModels, total: provider.models })} value={provider.label ?? provider.source ?? provider.id} />
         </div>
-      </div>
+
+        {provider.docsUrl && (
+          <a
+            href={provider.docsUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 inline-flex h-7 items-center gap-1.5 rounded-full border border-pi-border px-2.5 text-[10px] font-medium text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+          >
+            <ExternalLink size={11} />
+            {t('settings.credentials.docs')}
+          </a>
+        )}
+      </section>
+
+      <section className="overflow-hidden rounded-2xl border border-pi-border bg-pi-bg-secondary">
+        <div className="border-b border-pi-border px-4 py-3">
+          <div className="text-xs font-semibold text-pi-text">{t('settings.credentials.apiKeySection')}</div>
+          <div className="mt-0.5 text-[10px] text-pi-dim">{t('settings.credentials.apiKeyHint')}</div>
+        </div>
+        <div className="grid gap-2 p-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <input
+            value={apiKey}
+            onChange={(event) => onApiKeyChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') onSave();
+            }}
+            type="password"
+            placeholder={t('settings.credentials.apiKeyPlaceholder')}
+            disabled={busy}
+            className="h-10 min-w-0 rounded-xl border border-pi-border bg-pi-bg-tertiary px-3 text-xs text-pi-text placeholder:text-pi-dim focus:border-pi-accent focus:outline-none disabled:opacity-50"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={onSave}
+              disabled={busy}
+              className="flex h-10 items-center gap-1.5 rounded-xl bg-pi-accent px-3 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              {t('common.save')}
+            </button>
+            <button
+              onClick={onTest}
+              disabled={busy || testing}
+              className="flex h-10 items-center gap-1.5 rounded-xl border border-pi-border px-3 text-xs font-medium text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text disabled:opacity-50"
+            >
+              {testing ? <Loader2 size={13} className="animate-spin" /> : <PlugZap size={13} />}
+              {t('common.test')}
+            </button>
+            <button
+              onClick={onRemove}
+              disabled={busy || !provider.configured}
+              className="h-10 rounded-xl border border-pi-border px-3 text-xs font-medium text-pi-muted transition-colors hover:border-pi-error/40 hover:text-pi-error disabled:opacity-50 disabled:hover:border-pi-border disabled:hover:text-pi-muted"
+            >
+              {t('settings.credentials.remove')}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-2xl border border-pi-border bg-pi-bg-secondary">
+        <div className="border-b border-pi-border px-4 py-3">
+          <div className="text-xs font-semibold text-pi-text">{t('settings.credentials.endpointSection')}</div>
+          <div className="mt-0.5 text-[10px] text-pi-dim">{t('settings.credentials.endpointHint')}</div>
+        </div>
+        <div className="grid gap-2 p-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <input
+            value={baseUrl}
+            onChange={(event) => onBaseUrlChange(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') onSaveEndpoint();
+            }}
+            placeholder={endpointPlaceholder}
+            disabled={endpointBusy}
+            className="h-10 min-w-0 rounded-xl border border-pi-border bg-pi-bg-tertiary px-3 font-mono text-[11px] text-pi-text placeholder:text-pi-dim focus:border-pi-accent focus:outline-none disabled:opacity-50"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={onSaveEndpoint}
+              disabled={endpointBusy || !endpointChanged}
+              className="flex h-10 items-center gap-1.5 rounded-xl border border-pi-border px-3 text-xs font-medium text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text disabled:opacity-50"
+            >
+              {endpointBusy ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              {t('settings.credentials.endpointApply')}
+            </button>
+            <button
+              onClick={onClearEndpoint}
+              disabled={endpointBusy || !provider.baseUrl}
+              className="h-10 rounded-xl border border-pi-border px-3 text-xs font-medium text-pi-muted transition-colors hover:border-pi-error/40 hover:text-pi-error disabled:opacity-50 disabled:hover:border-pi-border disabled:hover:text-pi-muted"
+            >
+              {t('settings.credentials.endpointClear')}
+            </button>
+          </div>
+        </div>
+      </section>
 
       {testResult && (
-        <div
+        <section
           className={cn(
-            'mt-3 rounded-md border px-3 py-2 text-xs',
+            'rounded-2xl border px-4 py-3 text-xs',
             testResult.ok
               ? 'border-pi-success/30 bg-pi-success/10 text-pi-success'
               : 'border-pi-warning/30 bg-pi-warning/10 text-pi-warning'
           )}
         >
           <div className="flex flex-wrap items-center gap-2">
-            {testResult.ok ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
-            <span>{testResult.message}</span>
+            {testResult.ok ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+            <span className="font-medium">{testResult.message}</span>
             <span className="text-[10px] opacity-75">{testResult.durationMs}ms</span>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] opacity-80">
             <span>{t('settings.credentials.modelsAvailable', { available: testResult.availableModels, total: testResult.models })}</span>
             {testResult.source && <span>{testResult.source}</span>}
             {testResult.modelId && <span className="font-mono">{testResult.modelId}</span>}
+            {testResult.endpoint && <span className="font-mono">{testResult.endpoint}</span>}
           </div>
-        </div>
+        </section>
       )}
+    </div>
+  );
+}
+
+function CredentialInfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="rounded-xl border border-pi-border bg-pi-bg-tertiary px-3 py-2">
+      <div className="text-[10px] text-pi-dim">{label}</div>
+      <div className={cn('mt-0.5 truncate text-xs text-pi-text', mono && 'font-mono')}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -1262,11 +1601,14 @@ function ProviderCredentialRow({
 function AppearanceSettings({ themes }: { themes: PiTheme[] }) {
   const settings = useSettingsStore();
   const addToast = useUIStore((s) => s.addToast);
+  const hiddenThemeNames = useExtensionStore((s) => s.hiddenThemeNames);
+  const resetThemeState = useExtensionStore((s) => s.resetThemeState);
   const { t } = useI18n();
   const [imageUrlDraft, setImageUrlDraft] = useState(
     settings.chatBackgroundImage.startsWith('http') ? settings.chatBackgroundImage : ''
   );
-  const runtimeThemes = listRuntimeThemes(themes);
+  const runtimeThemes = listRuntimeThemes(themes).filter((theme) => !hiddenThemeNames.includes(theme.name));
+  const themeGroups = groupRuntimeThemesBySeries(runtimeThemes);
 
   useEffect(() => {
     if (settings.chatBackgroundImage.startsWith('http')) {
@@ -1313,42 +1655,100 @@ function AppearanceSettings({ themes }: { themes: PiTheme[] }) {
     });
   };
 
+  const resetThemes = () => {
+    if (!confirm(t('settings.appearance.resetThemesConfirm'))) return;
+    resetThemeState();
+    settings.updateSetting('theme', 'dark');
+    piApi.send({ type: 'theme_set', name: 'dark' });
+    addToast({ type: 'success', message: t('settings.appearance.themesReset') });
+  };
+
+  const resetAllSettings = () => {
+    if (!confirm(t('settings.appearance.resetSettingsConfirm'))) return;
+    settings.resetSettings();
+    setImageUrlDraft('');
+    piApi.send({ type: 'theme_set', name: 'dark' });
+    addToast({ type: 'success', message: t('settings.appearance.settingsReset') });
+  };
+
   return (
     <div className="max-w-4xl space-y-6">
       <h2 className="text-sm font-semibold text-pi-text mb-4">{t('settings.appearance.title')}</h2>
 
       <div>
         <label className="text-[10px] font-semibold text-pi-dim uppercase">{t('settings.appearance.theme')}</label>
-        <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4">
-          {runtimeThemes.map((theme) => (
-            <button
-              key={theme.name}
-              onClick={() => {
-                settings.updateSetting('theme', theme.name);
-                piApi.send({ type: 'theme_set', name: theme.name });
-              }}
-              className={cn(
-                'text-left px-3 py-2 rounded-lg border transition-colors',
-                settings.theme === theme.name
-                  ? 'border-pi-accent bg-pi-accent/5'
-                  : 'border-pi-border hover:border-pi-muted'
-              )}
-            >
-              <div className="mb-2 flex gap-1">
-                {['bg', 'bgSecondary', 'accent', 'text'].map((token) => (
-                  <span
-                    key={token}
-                    className="h-3 flex-1 rounded-sm border border-pi-border"
-                    style={{ backgroundColor: theme.colors[token] ?? theme.colors.bg }}
-                  />
-                ))}
-              </div>
-              <div className="text-xs font-medium text-pi-text">{themeDisplayName(theme.name)}</div>
-              <div className="mt-0.5 text-[10px] text-pi-dim">{theme.name}</div>
-            </button>
-          ))}
+        <div className="mt-2 space-y-4">
+          {(['dark', 'light'] as const).map((series) => {
+            const seriesThemes = themeGroups[series];
+            if (seriesThemes.length === 0) return null;
+
+            return (
+              <section key={series}>
+                <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-pi-dim">
+                  {t(`settings.appearance.themeSeries.${series}`)}
+                </div>
+                <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4">
+                  {seriesThemes.map((theme) => (
+                    <button
+                      key={theme.name}
+                      onClick={() => {
+                        settings.updateSetting('theme', theme.name);
+                        piApi.send({ type: 'theme_set', name: theme.name });
+                      }}
+                      className={cn(
+                        'text-left px-3 py-2 rounded-lg border transition-colors',
+                        settings.theme === theme.name
+                          ? 'border-pi-accent bg-pi-accent/5'
+                          : 'border-pi-border hover:border-pi-muted'
+                      )}
+                    >
+                      <div className="mb-2 flex gap-1">
+                        {['bg', 'bgSecondary', 'accent', 'text'].map((token) => (
+                          <span
+                            key={token}
+                            className="h-3 flex-1 rounded-sm border border-pi-border"
+                            style={{ backgroundColor: theme.colors[token] ?? theme.colors.bg }}
+                          />
+                        ))}
+                      </div>
+                      <div className="text-xs font-medium text-pi-text">{themeDisplayName(theme.name)}</div>
+                      <div className="mt-0.5 text-[10px] text-pi-dim">{theme.name}</div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       </div>
+
+      <section className="rounded-2xl border border-pi-border bg-pi-bg-secondary/70 p-4 shadow-sm shadow-black/5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-xs font-semibold text-pi-text">
+              <RefreshCw size={14} />
+              {t('settings.appearance.resetTitle')}
+            </div>
+            <p className="mt-1 text-xs leading-5 text-pi-dim">
+              {t('settings.appearance.resetHint')}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={resetThemes}
+              className="h-8 rounded-full border border-pi-border bg-pi-bg-tertiary px-3 text-xs text-pi-muted transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+            >
+              {t('settings.appearance.resetThemes')}
+            </button>
+            <button
+              onClick={resetAllSettings}
+              className="h-8 rounded-full bg-pi-error/10 px-3 text-xs font-medium text-pi-error transition-colors hover:bg-pi-error/15"
+            >
+              {t('settings.appearance.resetSettings')}
+            </button>
+          </div>
+        </div>
+      </section>
 
       <section className="space-y-3 border-t border-pi-border pt-5">
         <div>

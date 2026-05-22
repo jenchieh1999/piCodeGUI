@@ -1,62 +1,170 @@
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowDownToLine } from 'lucide-react';
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
-import type { ChatMessage } from '../../types';
+import { Virtuoso, type ListRange, type VirtuosoHandle } from 'react-virtuoso';
+import type { ChatMessage, PermissionRequest } from '../../types';
 import { MessageBubble } from './MessageBubble';
 import { useChatStore } from '../../stores/chatStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useUIStore } from '../../stores/uiStore';
 import { useI18n } from '../../lib/i18n';
 import { cn } from '../shared/utils';
+import { PermissionInlineCard } from './PermissionDialog';
 
 interface MessageListProps {
+  sessionId: string;
   messages: ChatMessage[];
 }
 
-export function MessageList({ messages }: MessageListProps) {
+type MessageListEntry =
+  | { type: 'message'; message: ChatMessage }
+  | { type: 'permission'; permission: PermissionRequest & { sessionId: string } };
+
+const clampItemIndex = (index: number, itemCount: number) =>
+  Math.min(Math.max(Math.round(index), 0), Math.max(itemCount - 1, 0));
+
+export function MessageList({ sessionId, messages }: MessageListProps) {
   const { t } = useI18n();
   const virtuosoRef = useRef<VirtuosoHandle>(null);
-  const isStreaming = useChatStore((s) => s.isStreaming);
+  const topItemIndexRef = useRef(0);
+  const isAtBottomRef = useRef(true);
+  const persistPositionRef = useRef<() => void>(() => {});
+  const pendingPermission = useChatStore((s) => s.pendingPermission);
   const showThinking = useSettingsStore((s) => s.showThinking);
+  const setChatScrollPosition = useUIStore((s) => s.setChatScrollPosition);
   const [isAtBottom, setIsAtBottom] = useState(true);
-  const sessionId = messages[0]?.sessionId ?? 'empty';
+  const inlinePermission = pendingPermission?.sessionId === sessionId ? pendingPermission : null;
+  const listItems = useMemo<MessageListEntry[]>(
+    () => [
+      ...messages.map((message) => ({ type: 'message' as const, message })),
+      ...(inlinePermission ? [{ type: 'permission' as const, permission: inlinePermission }] : []),
+    ],
+    [inlinePermission, messages]
+  );
+  const initialScrollPosition = useMemo(
+    () => useUIStore.getState().chatScrollPositions[sessionId],
+    [sessionId]
+  );
+  const initialTopMostItemIndex = useMemo(() => {
+    if (listItems.length === 0) return 0;
+    const lastIndex = listItems.length - 1;
+    if (!initialScrollPosition || initialScrollPosition.atBottom) {
+      return { index: lastIndex, align: 'end' as const };
+    }
+    return {
+      index: clampItemIndex(initialScrollPosition.topItemIndex, listItems.length),
+      align: 'start' as const,
+    };
+  }, [initialScrollPosition, listItems.length]);
 
   useEffect(() => {
-    setIsAtBottom(true);
+    const nextAtBottom = initialScrollPosition?.atBottom ?? true;
+    setIsAtBottom(nextAtBottom);
+    isAtBottomRef.current = nextAtBottom;
+    topItemIndexRef.current = initialScrollPosition
+      ? clampItemIndex(initialScrollPosition.topItemIndex, listItems.length)
+      : Math.max(listItems.length - 1, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // Auto-scroll to bottom on new messages
-  const followOutput = useCallback(
-    (isAtBottom: boolean) => {
-      if (isAtBottom || isStreaming) return 'smooth' as const;
-      return false;
+  const persistScrollPosition = useCallback(
+    (updates: { topItemIndex?: number; atBottom?: boolean } = {}) => {
+      if (!sessionId || listItems.length === 0) return;
+      const atBottom = updates.atBottom ?? isAtBottomRef.current;
+      const topItemIndex = atBottom
+        ? listItems.length - 1
+        : clampItemIndex(updates.topItemIndex ?? topItemIndexRef.current, listItems.length);
+      setChatScrollPosition(sessionId, {
+        topItemIndex,
+        atBottom,
+        itemCount: listItems.length,
+        updatedAt: Date.now(),
+      });
     },
-    [isStreaming]
+    [listItems.length, sessionId, setChatScrollPosition]
+  );
+
+  useEffect(() => {
+    persistPositionRef.current = persistScrollPosition;
+  }, [persistScrollPosition]);
+
+  useEffect(
+    () => () => {
+      persistPositionRef.current();
+    },
+    []
+  );
+
+  const followOutput = useCallback((atBottom: boolean) => {
+    if (atBottom) return 'smooth' as const;
+    return false;
+  }, []);
+
+  const handleRangeChanged = useCallback(
+    (range: ListRange) => {
+      topItemIndexRef.current = clampItemIndex(range.startIndex, listItems.length);
+      persistScrollPosition({ topItemIndex: range.startIndex });
+    },
+    [listItems.length, persistScrollPosition]
+  );
+
+  const handleAtBottomStateChange = useCallback(
+    (atBottom: boolean) => {
+      setIsAtBottom(atBottom);
+      isAtBottomRef.current = atBottom;
+      persistScrollPosition({ atBottom });
+    },
+    [persistScrollPosition]
   );
 
   const scrollToBottom = useCallback(() => {
-    if (messages.length === 0) return;
+    if (listItems.length === 0) return;
+    const lastIndex = listItems.length - 1;
     virtuosoRef.current?.scrollToIndex({
-      index: messages.length - 1,
+      index: lastIndex,
       align: 'end',
       behavior: 'smooth',
     });
+    topItemIndexRef.current = lastIndex;
+    isAtBottomRef.current = true;
     setIsAtBottom(true);
-  }, [messages.length]);
+    persistScrollPosition({ topItemIndex: lastIndex, atBottom: true });
+  }, [listItems.length, persistScrollPosition]);
+
+  useEffect(() => {
+    if (!inlinePermission?.requestId) return;
+    const frame = requestAnimationFrame(() => scrollToBottom());
+    return () => cancelAnimationFrame(frame);
+  }, [inlinePermission?.requestId, scrollToBottom]);
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-transparent">
       <Virtuoso
+        key={sessionId}
         ref={virtuosoRef}
-        data={messages}
+        data={listItems}
         followOutput={followOutput}
-        atBottomStateChange={setIsAtBottom}
-        itemContent={(index, message) => (
-          <MessageBubble
-            key={message.id}
-            message={message}
-            showThinking={showThinking}
-          />
-        )}
+        initialTopMostItemIndex={initialTopMostItemIndex}
+        rangeChanged={handleRangeChanged}
+        atBottomStateChange={handleAtBottomStateChange}
+        itemContent={(index, item) => {
+          if (item.type === 'permission') {
+            return (
+              <div className="px-4 py-3">
+                <div className="mx-auto max-w-3xl">
+                  <PermissionInlineCard permission={item.permission} />
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <MessageBubble
+              key={item.message.id}
+              message={item.message}
+              showThinking={showThinking}
+            />
+          );
+        }}
         className="scrollbar-thin bg-transparent"
         style={{ height: '100%', background: 'transparent' }}
         increaseViewportBy={200}

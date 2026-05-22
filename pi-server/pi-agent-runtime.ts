@@ -7,6 +7,7 @@ import {
   incrementSessionMessageCount,
   setSessionStatus,
 } from './mock-agent.js';
+import { extensionService } from './extension-service.js';
 import type {
   FileChangeData,
   PermissionRequestData,
@@ -18,13 +19,19 @@ import type {
   ToolUseData,
 } from './types.js';
 import { getWorkspaceStatus } from './workspace-service.js';
+import { getAuthPath, getModelsPath } from './agent-paths.js';
+import { normalizeProviderModelId } from './model-catalog.js';
+import { normalizeProviderAlias } from './provider-metadata.js';
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent');
 type PiAgentSession = import('@earendil-works/pi-coding-agent').AgentSession;
 type PiAgentSessionEvent = import('@earendil-works/pi-coding-agent').AgentSessionEvent;
+type PiModel = NonNullable<ReturnType<PiAgentSession['modelRegistry']['find']>>;
 
 interface PiRuntimeSession {
   appSessionId: string;
+  cwd: string;
+  resourceRevision: number;
   session: PiAgentSession;
   unsubscribe: () => void;
   callbacks: RuntimeCallbacks;
@@ -105,11 +112,16 @@ export class PiAgentRuntime implements AgentRuntime {
   }
 
   async setModel(provider: string, modelId: string): Promise<void> {
-    this.selectedModel = { provider, modelId };
+    const selection = normalizeModelSelection(provider, modelId);
+    this.selectedModel = selection;
     for (const runtimeSession of this.sessions.values()) {
-      const model = runtimeSession.session.modelRegistry.find(provider, modelId);
+      const model = findCompatibleSdkModel(
+        runtimeSession.session.modelRegistry,
+        selection.provider,
+        selection.modelId,
+      );
       if (!model) {
-        throw new Error(`Pi SDK model not found: ${provider}/${modelId}`);
+        throw new Error(`Pi SDK model not found: ${selection.provider}/${selection.modelId}`);
       }
       await runtimeSession.session.setModel(model);
     }
@@ -148,17 +160,26 @@ export class PiAgentRuntime implements AgentRuntime {
   }
 
   private async ensureSession(appSessionId: string, callbacks: RuntimeCallbacks): Promise<PiRuntimeSession> {
-    const existing = this.sessions.get(appSessionId);
-    if (existing) return existing;
-
-    const sdk = await this.loadSdk();
     const appSession = getSession(appSessionId);
     const cwd = resolveProjectPath(appSession?.projectPath ?? '.');
-    const authStorage = sdk.AuthStorage.create();
-    const modelRegistry = sdk.ModelRegistry.create(authStorage);
+    const resourceContext = await extensionService.getRuntimeContext(cwd);
+    const existing = this.sessions.get(appSessionId);
+    if (existing && existing.cwd === cwd && existing.resourceRevision === resourceContext.revision) {
+      return existing;
+    }
+
+    if (existing) {
+      existing.unsubscribe();
+      existing.session.dispose();
+      this.sessions.delete(appSessionId);
+    }
+
+    const sdk = await this.loadSdk();
+    const authStorage = sdk.AuthStorage.create(getAuthPath());
+    const modelRegistry = sdk.ModelRegistry.create(authStorage, getModelsPath());
     const sessionManager = sdk.SessionManager.inMemory(cwd);
     const selectedModel = this.selectedModel
-      ? modelRegistry.find(this.selectedModel.provider, this.selectedModel.modelId)
+      ? findCompatibleSdkModel(modelRegistry, this.selectedModel.provider, this.selectedModel.modelId)
       : undefined;
 
     const { session, modelFallbackMessage } = await sdk.createAgentSession({
@@ -166,6 +187,9 @@ export class PiAgentRuntime implements AgentRuntime {
       authStorage,
       modelRegistry,
       sessionManager,
+      settingsManager: resourceContext.settingsManager,
+      resourceLoader: resourceContext.resourceLoader,
+      agentDir: resourceContext.agentDir,
       model: selectedModel,
       thinkingLevel: this.thinkingLevel as any,
       tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
@@ -174,6 +198,8 @@ export class PiAgentRuntime implements AgentRuntime {
 
     const runtimeSession: PiRuntimeSession = {
       appSessionId,
+      cwd,
+      resourceRevision: resourceContext.revision,
       session,
       callbacks,
       currentMessageId: undefined,
@@ -598,6 +624,40 @@ function mapWorkspaceStatus(status: string): FileChangeData['status'] {
 function resolveProjectPath(projectPath: string): string {
   if (!projectPath || projectPath === '.') return process.cwd();
   return path.isAbsolute(projectPath) ? projectPath : path.resolve(process.cwd(), projectPath);
+}
+
+function normalizeModelSelection(provider: string, modelId: string): { provider: string; modelId: string } {
+  const normalizedProvider = normalizeProviderAlias(provider);
+  return {
+    provider: normalizedProvider,
+    modelId: normalizeProviderModelId(normalizedProvider, modelId),
+  };
+}
+
+function findCompatibleSdkModel(
+  modelRegistry: PiAgentSession['modelRegistry'],
+  provider: string,
+  modelId: string,
+): PiModel | undefined {
+  const selection = normalizeModelSelection(provider, modelId);
+  const exact = modelRegistry.find(selection.provider, selection.modelId);
+  if (exact) return canonicalizeSdkModel(exact, selection.provider, selection.modelId);
+
+  const compatible = modelRegistry.getAll().find((model) =>
+    normalizeProviderAlias(model.provider) === selection.provider
+      && normalizeProviderModelId(selection.provider, model.id) === selection.modelId
+  );
+  return compatible ? canonicalizeSdkModel(compatible, selection.provider, selection.modelId) : undefined;
+}
+
+function canonicalizeSdkModel(model: PiModel, provider: string, modelId: string): PiModel {
+  if (model.provider === provider && model.id === modelId) return model;
+  return {
+    ...model,
+    provider,
+    id: modelId,
+    name: provider === 'zai' ? modelId : model.name,
+  };
 }
 
 function toPiImages(images: RuntimePromptInput['images']): PiImageContent[] | undefined {

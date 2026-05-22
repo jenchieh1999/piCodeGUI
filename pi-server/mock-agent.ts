@@ -25,6 +25,7 @@ import type {
 } from './types.js';
 import { deleteMessages, loadMessages, loadSessions, saveMessages, saveSessions } from './persistence.js';
 import { generateSessionTitle } from './session-title.js';
+import { normalizeProviderModelId } from './model-catalog.js';
 
 // ---- In-memory state ----
 
@@ -72,45 +73,51 @@ const themes: ThemeData[] = [
   {
     name: 'dark',
     colors: {
-      accent: '#00aaff', border: '#3a3a3e', borderAccent: '#00aaff', borderMuted: '#2a2a2e',
-      success: '#00cc66', error: '#ff4444', warning: '#ffaa00', muted: '#888892', dim: '#55555a',
-      text: '#e0e0e8', thinkingText: '#a0a0b0', selectedBg: '#2d2d38',
-      userMessageBg: '#2d2d38', userMessageText: '#e0e0e8',
-      customMessageBg: '#2d2d38', customMessageText: '#e0e0e8', customMessageLabel: '#00aaff',
-      toolPendingBg: '#1e1e2e', toolSuccessBg: '#1e2e1e', toolErrorBg: '#2e1e1e',
-      toolTitle: '#00aaff', toolOutput: '#c0c0d0',
-      mdHeading: '#ffaa00', mdLink: '#00aaff', mdLinkUrl: '#888892',
-      mdCode: '#00ffff', mdCodeBlock: '#e0e0e8', mdCodeBlockBorder: '#3a3a3e',
-      mdQuote: '#888892', mdQuoteBorder: '#3a3a3e', mdHr: '#3a3a3e', mdListBullet: '#00ffff',
-      toolDiffAdded: '#00cc66', toolDiffRemoved: '#ff4444', toolDiffContext: '#888892',
-      syntaxComment: '#888892', syntaxKeyword: '#00aaff', syntaxFunction: '#00ccff',
-      syntaxVariable: '#ffaa00', syntaxString: '#00cc66', syntaxNumber: '#ff66cc',
-      syntaxType: '#00ccff', syntaxOperator: '#00aaff', syntaxPunctuation: '#888892',
-      thinkingOff: '#55555a', thinkingMinimal: '#00aaff', thinkingLow: '#00ccff',
-      thinkingMedium: '#00ffff', thinkingHigh: '#ff66cc', thinkingXhigh: '#ff4444',
-      bashMode: '#ffaa00',
+      accent: '#5ac8fa', border: '#343b49', borderAccent: '#5ac8fa', borderMuted: '#242a34',
+      success: '#63d48a', error: '#ff6b72', warning: '#f6c177', muted: '#a7b0c0', dim: '#6e7786',
+      text: '#edf0f7', thinkingText: '#bac3d4', bg: '#111318', bgSecondary: '#171a21',
+      bgTertiary: '#20242d', bgHover: '#2a303b', titlebarBg: '#0d0f13',
+      titlebarText: '#edf0f7', titlebarBorder: '#242a34', titlebarHover: '#20242d',
+      titlebarActive: '#263241', selectedBg: '#263241',
+      userMessageBg: '#1f2a38', userMessageText: '#f4f7fb',
+      customMessageBg: '#1c2430', customMessageText: '#f4f7fb', customMessageLabel: '#5ac8fa',
+      toolPendingBg: '#1c2230', toolSuccessBg: '#14271d', toolErrorBg: '#2b171c',
+      toolTitle: '#7dcfff', toolOutput: '#d8deea',
+      mdHeading: '#f6c177', mdLink: '#7dcfff', mdLinkUrl: '#9da7b8',
+      mdCode: '#9adbd5', mdCodeBlock: '#f1f4f8', mdCodeBlockBorder: '#3c4657',
+      mdQuote: '#bac3d4', mdQuoteBorder: '#4d8fd6', mdHr: '#343b49', mdListBullet: '#9adbd5',
+      toolDiffAdded: '#63d48a', toolDiffRemoved: '#ff6b72', toolDiffContext: '#9da7b8',
+      syntaxComment: '#8792a2', syntaxKeyword: '#7dcfff', syntaxFunction: '#9adbd5',
+      syntaxVariable: '#f6c177', syntaxString: '#63d48a', syntaxNumber: '#f5a6d6',
+      syntaxType: '#b7b9ff', syntaxOperator: '#7dcfff', syntaxPunctuation: '#bac3d4',
+      thinkingOff: '#6e7786', thinkingMinimal: '#5ac8fa', thinkingLow: '#7dcfff',
+      thinkingMedium: '#9adbd5', thinkingHigh: '#f6c177', thinkingXhigh: '#ff6b72',
+      bashMode: '#f6c177',
     },
   },
   {
     name: 'light',
     colors: {
-      accent: '#0066cc', border: '#d4d4d8', borderAccent: '#0066cc', borderMuted: '#e4e4e7',
-      success: '#008a3a', error: '#cc0000', warning: '#cc8800', muted: '#71717a', dim: '#a1a1aa',
-      text: '#18181b', thinkingText: '#52525b', selectedBg: '#e4e4e7',
-      userMessageBg: '#f4f4f5', userMessageText: '#18181b',
-      customMessageBg: '#f4f4f5', customMessageText: '#18181b', customMessageLabel: '#0066cc',
-      toolPendingBg: '#f0f0ff', toolSuccessBg: '#f0fff0', toolErrorBg: '#fff0f0',
-      toolTitle: '#0066cc', toolOutput: '#3f3f46',
-      mdHeading: '#cc8800', mdLink: '#0066cc', mdLinkUrl: '#71717a',
-      mdCode: '#008888', mdCodeBlock: '#18181b', mdCodeBlockBorder: '#d4d4d8',
-      mdQuote: '#71717a', mdQuoteBorder: '#d4d4d8', mdHr: '#d4d4d8', mdListBullet: '#008888',
-      toolDiffAdded: '#008a3a', toolDiffRemoved: '#cc0000', toolDiffContext: '#71717a',
-      syntaxComment: '#71717a', syntaxKeyword: '#0066cc', syntaxFunction: '#0088cc',
-      syntaxVariable: '#cc8800', syntaxString: '#008a3a', syntaxNumber: '#cc44aa',
-      syntaxType: '#0088cc', syntaxOperator: '#0066cc', syntaxPunctuation: '#71717a',
-      thinkingOff: '#a1a1aa', thinkingMinimal: '#0066cc', thinkingLow: '#0088cc',
-      thinkingMedium: '#008888', thinkingHigh: '#cc44aa', thinkingXhigh: '#cc0000',
-      bashMode: '#cc8800',
+      accent: '#006edb', border: '#d6dce6', borderAccent: '#006edb', borderMuted: '#e5e9f0',
+      success: '#1f8f55', error: '#c8404a', warning: '#9b6400', muted: '#5f6673', dim: '#8d95a3',
+      text: '#1d1d1f', thinkingText: '#4f5968', bg: '#f7f8fa', bgSecondary: '#ffffff',
+      bgTertiary: '#eef1f5', bgHover: '#e5e9f0', titlebarBg: '#f3f5f8',
+      titlebarText: '#1d1d1f', titlebarBorder: '#d6dce6', titlebarHover: '#e8edf4',
+      titlebarActive: '#dcecff', selectedBg: '#dcecff',
+      userMessageBg: '#edf5ff', userMessageText: '#1d1d1f',
+      customMessageBg: '#f2f6fb', customMessageText: '#1d1d1f', customMessageLabel: '#006edb',
+      toolPendingBg: '#f1f5fb', toolSuccessBg: '#edf9f1', toolErrorBg: '#fff0f2',
+      toolTitle: '#006edb', toolOutput: '#2d3340',
+      mdHeading: '#875a00', mdLink: '#006edb', mdLinkUrl: '#6f7784',
+      mdCode: '#006d73', mdCodeBlock: '#1d1d1f', mdCodeBlockBorder: '#cbd3df',
+      mdQuote: '#5f6673', mdQuoteBorder: '#5a9ee8', mdHr: '#d6dce6', mdListBullet: '#006d73',
+      toolDiffAdded: '#1f8f55', toolDiffRemoved: '#c8404a', toolDiffContext: '#6f7784',
+      syntaxComment: '#6f7784', syntaxKeyword: '#006edb', syntaxFunction: '#007d8a',
+      syntaxVariable: '#875a00', syntaxString: '#1f8f55', syntaxNumber: '#a5367a',
+      syntaxType: '#5a55b3', syntaxOperator: '#006edb', syntaxPunctuation: '#5f6673',
+      thinkingOff: '#8d95a3', thinkingMinimal: '#006edb', thinkingLow: '#007d8a',
+      thinkingMedium: '#006d73', thinkingHigh: '#9b6400', thinkingXhigh: '#c8404a',
+      bashMode: '#875a00',
     },
   },
 ];
@@ -311,8 +318,13 @@ export function setSessionModel(sessionId: string, model: ModelData): SessionDat
 
 export function getSessionModel(session: SessionData, providerCatalog: ProviderData[], fallback: ModelData): ModelData {
   const provider = session.modelProvider ?? inferModelProvider(session.modelId) ?? fallback.provider;
-  return providerCatalog.find((item) => item.id === provider)?.models.find((model) => model.id === session.modelId)
-    ?? providerCatalog.flatMap((item) => item.models).find((model) => model.id === session.modelId)
+  const providerModelId = normalizeProviderModelId(provider, session.modelId);
+  return providerCatalog.find((item) => item.id === provider)?.models.find((model) =>
+    normalizeProviderModelId(model.provider, model.id) === providerModelId
+  )
+    ?? providerCatalog.flatMap((item) => item.models).find((model) =>
+      normalizeProviderModelId(model.provider, model.id) === normalizeProviderModelId(model.provider, session.modelId)
+    )
     ?? fallback;
 }
 

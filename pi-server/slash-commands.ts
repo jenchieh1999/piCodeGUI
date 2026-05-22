@@ -7,13 +7,15 @@ const BUILTIN_SLASH_COMMANDS: SlashCommandData[] = [
   { name: '/test', description: 'Run or design the relevant test flow.', category: 'Code', source: 'builtin' },
   { name: '/explain', description: 'Explain the selected code or current project area.', category: 'Code', source: 'builtin' },
   { name: '/compact', description: 'Compact the current conversation context.', category: 'Session', source: 'builtin' },
+  { name: '/clear', description: 'Clear the current conversation and reset its runtime context.', category: 'Session', source: 'builtin' },
   { name: '/tree', description: 'Open the session checkpoint tree.', category: 'Session', source: 'builtin' },
   { name: '/fork', description: 'Fork from the current checkpoint.', category: 'Session', source: 'builtin' },
   { name: '/new', description: 'Start a new project session.', category: 'Session', source: 'builtin' },
+  { name: '/projects', description: 'Open the project launcher and recent project picker.', category: 'Session', source: 'builtin' },
   { name: '/memory', description: 'Inspect or update durable project memory.', category: 'Runtime', source: 'builtin' },
 ];
 
-export function getSlashCommands(packages: PackageData[] = []): SlashCommandData[] {
+export function getSlashCommands(packages: PackageData[] = [], resourceCommands: SlashCommandData[] = []): SlashCommandData[] {
   const extensionCommands = packages.flatMap((pkg) =>
     (pkg.prompts ?? []).map<SlashCommandData>((prompt) => {
       const normalized = prompt.startsWith('/') ? prompt : `/${prompt}`;
@@ -26,7 +28,7 @@ export function getSlashCommands(packages: PackageData[] = []): SlashCommandData
     })
   );
 
-  return dedupeCommands([...extensionCommands, ...BUILTIN_SLASH_COMMANDS]);
+  return dedupeCommands([...resourceCommands, ...extensionCommands, ...BUILTIN_SLASH_COMMANDS]);
 }
 
 function dedupeCommands(commands: SlashCommandData[]): SlashCommandData[] {

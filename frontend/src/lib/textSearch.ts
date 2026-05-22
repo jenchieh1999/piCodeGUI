@@ -24,6 +24,8 @@ export const DEFAULT_TEXT_SEARCH_OPTIONS: TextSearchOptions = {
   regex: false,
 };
 
+const MAX_SEARCH_SEED_LENGTH = 240;
+
 export function findTextMatches(text: string, query: string, options: TextSearchOptions): { matches: TextSearchMatch[]; error: string | null } {
   if (!query) return { matches: [], error: null };
 
@@ -172,6 +174,26 @@ export function clearDomSearchHighlights(root: HTMLElement | null) {
     mark.replaceWith(document.createTextNode(mark.textContent ?? ''));
   }
   root.normalize();
+}
+
+export function getSearchSeedFromTextArea(input: HTMLTextAreaElement | null): string {
+  if (!input || input.selectionStart === input.selectionEnd) return '';
+  return normalizeSearchSeed(input.value.slice(input.selectionStart, input.selectionEnd));
+}
+
+export function getSearchSeedFromDocument(): string {
+  if (typeof window === 'undefined') return '';
+  return normalizeSearchSeed(window.getSelection()?.toString() ?? '');
+}
+
+export function normalizeSearchSeed(value: string): string {
+  const normalized = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized || normalized.length > MAX_SEARCH_SEED_LENGTH) return '';
+  return normalized;
 }
 
 function createSearchRegExpForReplace(query: string, options: TextSearchOptions): RegExp {

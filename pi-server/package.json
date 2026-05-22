@@ -1,6 +1,6 @@
 {
   "name": "pi-agent-server",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^0.74.1",
     "@earendil-works/pi-coding-agent": "*",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
     "ws": "^8.18.0"

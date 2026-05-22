@@ -17,7 +17,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { useI18n } from '../../lib/i18n';
 import { cn } from './utils';
 
-export function ProjectLauncher() {
+export function ProjectLauncher({ onLaunch }: { onLaunch?: () => void } = {}) {
   const { t } = useI18n();
   const addToast = useUIStore((s) => s.addToast);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
@@ -133,10 +133,11 @@ export function ProjectLauncher() {
 
   const handleLaunch = () => {
     if (!canLaunch) return;
-    createSessionForProject(projectPath.trim(), {
+    const launched = createSessionForProject(projectPath.trim(), {
       branch: context?.state === 'ok' ? selectedBranch : null,
       worktree: context?.state === 'ok' ? useWorktree : false,
     });
+    if (launched) onLaunch?.();
   };
 
   const selectRecentProject = (project: RecentProject) => {

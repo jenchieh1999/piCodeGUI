@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { useUIStore } from '../../stores/uiStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useModelStore } from '../../stores/modelStore';
+import { useTerminalStore } from '../../stores/terminalStore';
 import { piApi } from '../../api/client';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
 import { FitAddon } from '@xterm/addon-fit';
@@ -14,7 +16,9 @@ import type {
   Session,
   TokenUsage,
   WorkspaceChangedFile,
+  WorkspaceChangeAction,
   WorkspaceDiffResult,
+  WorkspaceGitOperationAction,
   WorkspaceReadFileResult,
   WorkspaceStatusResult,
   WorkspaceTreeEntry,
@@ -26,8 +30,11 @@ import {
   Activity,
   ChevronDown,
   ChevronRight,
+  Check,
+  ClipboardPaste,
   Code2,
   Copy,
+  Download,
   ExternalLink,
   File,
   Files,
@@ -37,14 +44,27 @@ import {
   GitBranch,
   GitCompare,
   MessageSquarePlus,
+  PanelBottomClose,
+  PanelBottomOpen,
   RefreshCw,
+  RotateCcw,
   Search,
+  Scissors,
   Square,
   Terminal as TerminalIcon,
+  Trash2,
+  Upload,
   X,
 } from 'lucide-react';
 import { cn } from '../shared/utils';
 import { MarkdownFileReader } from '../markdown/MarkdownFileReader';
+import {
+  createWorkspaceFileDragPayload,
+  hasWorkspaceFileDragPayload,
+  readWorkspaceFileDragPayload,
+  setWorkspaceFileDragData,
+  type WorkspaceFileDragPayload,
+} from '../../lib/workspaceDrag';
 
 const PANEL_CONFIG: Record<RightPanelType & string, { icon: typeof GitCompare; labelKey: TranslationKey }> = {
   changes: { icon: GitCompare, labelKey: 'rightPanel.changes' },
@@ -74,6 +94,15 @@ type LineSelection = {
   end: number;
 };
 
+type WorkspaceFileClipboard = {
+  action: 'copy' | 'cut';
+  entry: WorkspaceTreeEntry;
+};
+
+type WorkspaceFileUndoOperation =
+  | { kind: 'copy'; targetPath: string }
+  | { kind: 'move'; fromPath: string; toPath: string; entry: WorkspaceTreeEntry };
+
 type PreviewTabCloseScope = 'current' | 'others' | 'left' | 'right' | 'all';
 
 const STATUS_META: Record<WorkspaceChangedFile['status'], { label: string; className: string }> = {
@@ -90,8 +119,41 @@ const STATUS_META: Record<WorkspaceChangedFile['status'], { label: string; class
 const WORKSPACE_PREVIEW_DEFAULT_RATIO = 0.45;
 const WORKSPACE_PREVIEW_MIN_RATIO = 0.22;
 const WORKSPACE_PREVIEW_MAX_RATIO = 0.72;
+const WORKSPACE_TREE_ROW_HEIGHT = 28;
+const WORKSPACE_TREE_STICKY_MAX_DEPTH = 8;
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+async function resolveTerminalDropPath(payload: WorkspaceFileDragPayload, targetSessionId: string): Promise<string> {
+  if (payload.sessionId === targetSessionId || isLikelyAbsolutePath(payload.path)) {
+    return payload.path;
+  }
+
+  const workspace = await piApi.getWorkspaceStatus(payload.sessionId);
+  if (workspace.state !== 'ok') {
+    throw new Error(workspace.error ?? 'Source workspace is unavailable.');
+  }
+  return joinWorkspacePath(workspace.workDir, payload.path);
+}
+
+function isLikelyAbsolutePath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/');
+}
+
+function joinWorkspacePath(workDir: string, workspacePath: string): string {
+  if (isLikelyAbsolutePath(workspacePath)) return workspacePath;
+  const separator = workDir.includes('\\') ? '\\' : '/';
+  const root = workDir.replace(/[\\/]+$/g, '');
+  const relative = workspacePath.replace(/^[\\/]+/g, '').replace(/[\\/]/g, separator);
+  return `${root}${separator}${relative}`;
+}
+
+function quotePathForTerminal(value: string): string {
+  if (/^[\w@%+=:,./\\-]+$/.test(value)) return value;
+  const isWindows = typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
+  const escaped = isWindows ? value.replace(/'/g, "''") : value.replace(/'/g, "'\\''");
+  return `'${escaped}'`;
+}
 
 export function RightPanel({ type }: RightPanelProps) {
   const { t } = useI18n();
@@ -154,25 +216,42 @@ export function RightPanel({ type }: RightPanelProps) {
   );
 }
 
-function TerminalPanel({ sessionId }: { sessionId: string }) {
+export function TerminalPanel({
+  sessionId,
+  compact = false,
+  showDockControl = true,
+}: {
+  sessionId: string;
+  compact?: boolean;
+  showDockControl?: boolean;
+}) {
   const { t } = useI18n();
   const session = useChatStore((s) => s.sessions.find((item) => item.id === sessionId));
   const addToast = useUIStore((s) => s.addToast);
+  const terminalDockOpen = useUIStore((s) => s.terminalDockOpen);
+  const setTerminalDockOpen = useUIStore((s) => s.setTerminalDockOpen);
   const terminalId = useMemo(() => `terminal:${sessionId}`, [sessionId]);
+  const terminalRecord = useTerminalStore((s) => s.terminals[terminalId]);
+  const markTerminalStarting = useTerminalStore((s) => s.markStarting);
+  const markTerminalError = useTerminalStore((s) => s.markError);
+  const clearTerminalOutput = useTerminalStore((s) => s.clearOutput);
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const [status, setStatus] = useState<'starting' | 'running' | 'exited' | 'error'>('starting');
-  const [cwd, setCwd] = useState(session?.projectPath ?? '');
-  const [shell, setShell] = useState('shell');
-  const [backend, setBackend] = useState<'pty' | 'pipe' | null>(null);
+  const [terminalDropActive, setTerminalDropActive] = useState(false);
+  const status = terminalRecord?.status ?? 'starting';
+  const cwd = terminalRecord?.cwd || session?.projectPath || '';
+  const backend = terminalRecord?.backend ?? null;
 
   const writeTerminal = useCallback((value: string) => {
     terminalRef.current?.write(value);
   }, []);
 
   const startTerminal = useCallback(() => {
-    setStatus('starting');
+    const current = useTerminalStore.getState().terminals[terminalId];
+    if (!current || current.status === 'exited' || current.status === 'error') {
+      markTerminalStarting(terminalId, sessionId);
+    }
     const terminal = terminalRef.current;
     const sent = piApi.send({
       type: 'terminal_start',
@@ -180,17 +259,72 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
       terminalId,
       cols: terminal?.cols,
       rows: terminal?.rows,
+      replay: !current?.output,
     });
     if (!sent) {
-      setStatus('error');
-      writeTerminal('\r\n[terminal error] Pi server is not connected; terminal cannot start.\r\n');
+      const message = 'Pi server is not connected; terminal cannot start.';
+      markTerminalError(terminalId, message, sessionId);
+      writeTerminal(`\r\n[terminal error] ${message}\r\n`);
       addToast({ type: 'error', message: 'Pi server is not connected; terminal cannot start.' });
     }
-  }, [addToast, sessionId, terminalId, writeTerminal]);
+  }, [addToast, markTerminalError, markTerminalStarting, sessionId, terminalId, writeTerminal]);
+
+  const openStandaloneTerminal = useCallback(async () => {
+    if (!window.piDesktop) {
+      addToast({ type: 'warning', message: t('rightPanel.terminal.standaloneOnlyDesktop') });
+      return;
+    }
+    try {
+      await window.piDesktop.openTerminalWindow(sessionId);
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : String(err), duration: 6000 });
+    }
+  }, [addToast, sessionId, t]);
 
   const stopTerminal = useCallback(() => {
     piApi.send({ type: 'terminal_stop', terminalId });
   }, [terminalId]);
+
+  const insertTerminalPath = useCallback(async (payload: WorkspaceFileDragPayload) => {
+    try {
+      const targetPath = await resolveTerminalDropPath(payload, sessionId);
+      const data = `${quotePathForTerminal(targetPath)} `;
+      const sent = piApi.send({ type: 'terminal_input', terminalId, data });
+      terminalRef.current?.focus();
+
+      if (!sent) {
+        throw new Error('Pi server is not connected; path was not inserted.');
+      }
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileOperationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  }, [addToast, sessionId, t, terminalId]);
+
+  const handleTerminalDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!hasWorkspaceFileDragPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    setTerminalDropActive(true);
+  }, []);
+
+  const handleTerminalDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setTerminalDropActive(false);
+  }, []);
+
+  const handleTerminalDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    const payload = readWorkspaceFileDragPayload(event.dataTransfer);
+    if (!payload) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setTerminalDropActive(false);
+    void insertTerminalPath(payload);
+  }, [insertTerminalPath]);
 
   const fitTerminal = useCallback(() => {
     const terminal = terminalRef.current;
@@ -255,8 +389,9 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
     const dataDisposable = terminal.onData((data) => {
       const sent = piApi.send({ type: 'terminal_input', terminalId, data });
       if (!sent) {
-        setStatus('error');
-        terminal.write('\r\n[terminal error] Pi server is not connected; input was not sent.\r\n');
+        const message = 'Pi server is not connected; input was not sent.';
+        markTerminalError(terminalId, message, sessionId);
+        terminal.write(`\r\n[terminal error] ${message}\r\n`);
       }
     });
 
@@ -284,16 +419,20 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
     resizeObserver.observe(element);
 
     window.requestAnimationFrame(() => {
+      const snapshot = useTerminalStore.getState().terminals[terminalId];
+      if (snapshot?.output) {
+        terminal.write(snapshot.output);
+      } else {
+        terminal.write('[terminal] starting...\r\n');
+      }
       fitTerminal();
       terminal.focus();
-      terminal.write('[terminal] starting...\r\n');
       startTerminal();
     });
 
     return () => {
       resizeObserver.disconnect();
       dataDisposable.dispose();
-      piApi.send({ type: 'terminal_stop', terminalId });
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -303,22 +442,15 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     return piApi.onMessage((message: WsServerMessage) => {
       if (message.type === 'terminal_started' && message.terminalId === terminalId) {
-        setStatus('running');
-        setCwd(message.cwd);
-        setShell(message.shell);
-        setBackend(message.backend);
-        writeTerminal(`\r\n[terminal] ${message.shell} ${message.backend} started in ${message.cwd}\r\n`);
         fitTerminal();
         terminalRef.current?.focus();
       }
 
       if (message.type === 'terminal_output' && message.terminalId === terminalId) {
-        setStatus('running');
         writeTerminal(message.data);
       }
 
       if (message.type === 'terminal_exited' && message.terminalId === terminalId) {
-        setStatus('exited');
         writeTerminal(`\r\n[terminal] exited${message.exitCode !== null ? ` with code ${message.exitCode}` : ''}${message.signal ? ` (${message.signal})` : ''}\r\n`);
       }
 
@@ -326,7 +458,6 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
         message.type === 'terminal_error'
         && (message.terminalId === terminalId || (!message.terminalId && message.sessionId === sessionId))
       ) {
-        setStatus('error');
         writeTerminal(`\r\n[terminal error] ${message.message}\r\n`);
       }
     });
@@ -334,6 +465,7 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
 
   const restartTerminal = () => {
     stopTerminal();
+    clearTerminalOutput(terminalId);
     terminalRef.current?.reset();
     terminalRef.current?.write('[terminal] restarting...\r\n');
     window.setTimeout(startTerminal, 180);
@@ -349,7 +481,7 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
           : 'bg-pi-bg-tertiary text-pi-dim';
   return (
     <div className="flex h-full min-h-0 flex-col bg-transparent">
-      <div className="border-b border-pi-border/70 px-3 py-2">
+      <div className={cn('border-b border-pi-border/70 px-3', compact ? 'py-1.5' : 'py-2')}>
         <div className="flex items-center gap-2">
           <TerminalIcon size={13} className="text-pi-accent" />
           <div className="min-w-0 flex-1">
@@ -364,8 +496,29 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
               {backend}
             </span>
           )}
+          {showDockControl && (
+            <button
+              type="button"
+              onClick={() => setTerminalDockOpen(!terminalDockOpen)}
+              className={cn(
+                'flex h-7 w-7 items-center justify-center rounded-lg border transition-colors hover:bg-pi-bg-hover',
+                terminalDockOpen ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent' : 'border-pi-border/70 bg-pi-bg-tertiary/60 text-pi-dim hover:text-pi-text'
+              )}
+              title={terminalDockOpen ? t('rightPanel.terminal.hideDock') : t('rightPanel.terminal.showDock')}
+            >
+              {terminalDockOpen ? <PanelBottomClose size={13} /> : <PanelBottomOpen size={13} />}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void openStandaloneTerminal()}
+            className="flex h-7 w-7 items-center justify-center rounded-lg border border-pi-border/70 bg-pi-bg-tertiary/60 text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+            title={t('rightPanel.terminal.openStandalone')}
+          >
+            <ExternalLink size={13} />
+          </button>
         </div>
-        <div className="mt-2 flex items-center gap-1">
+        <div className={cn('flex items-center gap-1', compact ? 'mt-1.5' : 'mt-2')}>
           <button
             type="button"
             onClick={() => terminalRef.current?.clear()}
@@ -402,14 +555,26 @@ function TerminalPanel({ sessionId }: { sessionId: string }) {
       </div>
 
       <div
-        ref={containerRef}
-        className="pi-xterm min-h-0 flex-1 overflow-hidden px-2 py-2"
-        onMouseDown={() => terminalRef.current?.focus()}
-      />
-
-      <div className="border-t border-pi-border/70 px-3 py-2 text-[10px] text-pi-dim">
-        {t('rightPanel.terminal.help')}
+        className={cn(
+          'relative min-h-0 flex-1 overflow-hidden transition-colors',
+          terminalDropActive && 'bg-pi-accent/5 ring-1 ring-inset ring-pi-accent/45'
+        )}
+        onDragOver={handleTerminalDragOver}
+        onDragLeave={handleTerminalDragLeave}
+        onDrop={handleTerminalDrop}
+      >
+        <div
+          ref={containerRef}
+          className="pi-xterm h-full min-h-0 overflow-hidden px-2 py-2"
+          onMouseDown={() => terminalRef.current?.focus()}
+        />
       </div>
+
+      {!compact && (
+        <div className="border-t border-pi-border/70 px-3 py-2 text-[10px] text-pi-dim">
+          {t('rightPanel.terminal.help')}
+        </div>
+      )}
     </div>
   );
 }
@@ -743,12 +908,22 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
   const [selectedRangeByTab, setSelectedRangeByTab] = useState<Record<string, LineSelection | undefined>>({});
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
+  const [busyChangeKey, setBusyChangeKey] = useState<string | null>(null);
+  const [busyGitAction, setBusyGitAction] = useState<WorkspaceGitOperationAction | null>(null);
+  const [commitMessage, setCommitMessage] = useState('');
   const splitAreaRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef({ startY: 0, startPreviewRatio: WORKSPACE_PREVIEW_DEFAULT_RATIO });
   const [previewHeightRatio, setPreviewHeightRatio] = useState(WORKSPACE_PREVIEW_DEFAULT_RATIO);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
   const [previewCollapsed, setPreviewCollapsed] = useState(false);
   const [isResizingPreview, setIsResizingPreview] = useState(false);
+  const [revealedFilePath, setRevealedFilePath] = useState<string | null>(null);
+  const [scrollTargetPath, setScrollTargetPath] = useState<string | null>(null);
+  const [selectedTreeEntry, setSelectedTreeEntry] = useState<WorkspaceTreeEntry | null>(null);
+  const [fileClipboard, setFileClipboard] = useState<WorkspaceFileClipboard | null>(null);
+  const [lastFileUndo, setLastFileUndo] = useState<WorkspaceFileUndoOperation | null>(null);
+  const workspaceOpenRequest = useUIStore((s) => s.workspaceOpenRequest);
+  const lastWorkspaceOpenRequestRef = useRef<number | null>(null);
 
   useEffect(() => {
     setMode(initialMode);
@@ -870,6 +1045,11 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
     setPreviewTabs([]);
     setActivePreviewId(null);
     setSelectedRangeByTab({});
+    setRevealedFilePath(null);
+    setScrollTargetPath(null);
+    setSelectedTreeEntry(null);
+    setFileClipboard(null);
+    setLastFileUndo(null);
     void loadStatus();
     void loadTree('');
   }, [sessionId, loadStatus, loadTree]);
@@ -927,6 +1107,37 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
       }));
     }
   };
+
+  const revealWorkspaceFile = useCallback(async (path: string) => {
+    const normalizedPath = normalizeWorkspaceFilePath(path);
+    if (!normalizedPath) return;
+
+    const parentPaths = parentWorkspacePaths(normalizedPath);
+    setMode('files');
+    setQuery('');
+    setWorkspaceCollapsed(false);
+    setPreviewCollapsed(false);
+    setRevealedFilePath(normalizedPath);
+    setScrollTargetPath(normalizedPath);
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      next.add('');
+      for (const parentPath of parentPaths) {
+        next.add(parentPath);
+      }
+      return next;
+    });
+
+    await Promise.all(['', ...parentPaths].map((parentPath) => loadTree(parentPath)));
+    void openPreview({ kind: 'file', path: normalizedPath });
+  }, [loadTree]);
+
+  useEffect(() => {
+    if (!workspaceOpenRequest || workspaceOpenRequest.sessionId !== sessionId) return;
+    if (lastWorkspaceOpenRequestRef.current === workspaceOpenRequest.id) return;
+    lastWorkspaceOpenRequestRef.current = workspaceOpenRequest.id;
+    void revealWorkspaceFile(workspaceOpenRequest.path);
+  }, [revealWorkspaceFile, sessionId, workspaceOpenRequest?.id, workspaceOpenRequest?.path, workspaceOpenRequest?.sessionId]);
 
   const activePreview = useMemo(
     () => previewTabs.find((tab) => tab.id === activePreviewId) ?? previewTabs.at(-1) ?? null,
@@ -1095,6 +1306,332 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
     }
   };
 
+  const refreshTreeAroundPaths = useCallback(async (paths: string[]) => {
+    const pathsToLoad = new Set<string>(['']);
+    for (const itemPath of paths) {
+      const normalizedPath = normalizeWorkspaceFilePath(itemPath);
+      const parentPath = immediateParentWorkspacePath(normalizedPath);
+      if (parentPath) pathsToLoad.add(parentPath);
+      for (const ancestorPath of parentWorkspacePaths(normalizedPath)) {
+        pathsToLoad.add(ancestorPath);
+      }
+    }
+    await Promise.all(Array.from(pathsToLoad).map((path) => loadTree(path)));
+  }, [loadTree]);
+
+  const removePreviewTabsForPath = useCallback((workspacePath: string) => {
+    const normalizedPath = normalizeWorkspaceFilePath(workspacePath);
+    if (!normalizedPath) return;
+
+    setPreviewTabs((tabs) => {
+      const removedIds = new Set<string>();
+      const next = tabs.filter((tab) => {
+        const affected = isWorkspacePathWithin(tab.target.path, normalizedPath);
+        if (affected) removedIds.add(tab.id);
+        return !affected;
+      });
+
+      if (removedIds.size > 0) {
+        setSelectedRangeByTab((current) => {
+          const kept: Record<string, LineSelection | undefined> = {};
+          for (const [id, selection] of Object.entries(current)) {
+            if (!removedIds.has(id)) kept[id] = selection;
+          }
+          return kept;
+        });
+        setActivePreviewId((current) => {
+          if (!current || !removedIds.has(current)) return current;
+          return next.at(-1)?.id ?? null;
+        });
+      }
+
+      return next;
+    });
+  }, []);
+
+  const addWorkspaceEntryToChat = (entry: WorkspaceTreeEntry) => {
+    if (entry.isDirectory) {
+      addToast({ type: 'warning', message: t('rightPanel.folderReferenceUnsupported') });
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent('pi:add-workspace-reference', {
+      detail: {
+        sessionId,
+        path: entry.path,
+        name: entry.name,
+      },
+    }));
+    addToast({ type: 'success', message: t('rightPanel.addedFileReference') });
+  };
+
+  const copyWorkspaceEntryPath = async (entry: WorkspaceTreeEntry) => {
+    try {
+      await navigator.clipboard.writeText(entry.path);
+      addToast({ type: 'success', message: t('rightPanel.pathCopied') });
+    } catch {
+      addToast({ type: 'error', message: t('rightPanel.copyPathFailed') });
+    }
+  };
+
+  const selectWorkspaceEntry = (entry: WorkspaceTreeEntry) => {
+    setSelectedTreeEntry(entry);
+    setRevealedFilePath(entry.path);
+  };
+
+  const copyWorkspaceEntryToClipboard = (entry: WorkspaceTreeEntry) => {
+    setSelectedTreeEntry(entry);
+    setFileClipboard({ action: 'copy', entry });
+    addToast({ type: 'success', message: t('rightPanel.fileCopiedToClipboard', { path: entry.path }) });
+  };
+
+  const cutWorkspaceEntryToClipboard = (entry: WorkspaceTreeEntry) => {
+    setSelectedTreeEntry(entry);
+    setFileClipboard({ action: 'cut', entry });
+    addToast({ type: 'success', message: t('rightPanel.fileCutToClipboard', { path: entry.path }) });
+  };
+
+  const pasteWorkspaceClipboard = async (targetEntry?: WorkspaceTreeEntry | null) => {
+    const clipboard = fileClipboard;
+    if (!clipboard) {
+      addToast({ type: 'warning', message: t('rightPanel.fileClipboardEmpty') });
+      return;
+    }
+
+    const targetDirectory = workspacePasteTargetDirectory(targetEntry ?? selectedTreeEntry);
+
+    try {
+      const result = clipboard.action === 'copy'
+        ? await piApi.copyWorkspacePath(sessionId, clipboard.entry.path, targetDirectory)
+        : await piApi.moveWorkspacePath(sessionId, clipboard.entry.path, targetDirectory);
+
+      if (result.state !== 'ok') {
+        throw new Error(result.error ?? t('rightPanel.filePasteFailed'));
+      }
+
+      if (clipboard.action === 'cut') {
+        removePreviewTabsForPath(clipboard.entry.path);
+        setFileClipboard(null);
+        setLastFileUndo({ kind: 'move', fromPath: clipboard.entry.path, toPath: result.targetPath, entry: clipboard.entry });
+      } else {
+        setLastFileUndo({ kind: 'copy', targetPath: result.targetPath });
+      }
+
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        next.add('');
+        const normalizedTargetDirectory = normalizeWorkspaceFilePath(targetDirectory);
+        if (normalizedTargetDirectory) next.add(normalizedTargetDirectory);
+        for (const parentPath of parentWorkspacePaths(result.targetPath)) {
+          next.add(parentPath);
+        }
+        return next;
+      });
+      setSelectedTreeEntry({
+        ...clipboard.entry,
+        name: result.targetPath.split('/').filter(Boolean).pop() ?? clipboard.entry.name,
+        path: result.targetPath,
+      });
+      setRevealedFilePath(result.targetPath);
+      setScrollTargetPath(result.targetPath);
+      await refreshTreeAroundPaths([clipboard.entry.path, targetDirectory, result.targetPath]);
+      void loadStatus({ silent: true });
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t('rightPanel.filePasted') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileOperationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
+  const undoWorkspaceFileOperation = async () => {
+    const operation = lastFileUndo;
+    if (!operation) {
+      addToast({ type: 'warning', message: t('rightPanel.fileUndoNothing') });
+      return;
+    }
+
+    try {
+      if (operation.kind === 'copy') {
+        const result = await piApi.deleteWorkspacePath(sessionId, operation.targetPath);
+        if (result.state !== 'ok') {
+          throw new Error(result.error ?? t('rightPanel.fileDeleteFailed'));
+        }
+        removePreviewTabsForPath(operation.targetPath);
+        setSelectedTreeEntry(null);
+        setRevealedFilePath((current) => current === operation.targetPath ? null : current);
+        await refreshTreeAroundPaths([operation.targetPath]);
+      } else {
+        const result = await piApi.moveWorkspacePath(sessionId, operation.toPath, immediateParentWorkspacePath(operation.fromPath));
+        if (result.state !== 'ok') {
+          throw new Error(result.error ?? t('rightPanel.fileMoveFailed'));
+        }
+        removePreviewTabsForPath(operation.toPath);
+        setSelectedTreeEntry({
+          ...operation.entry,
+          name: operation.fromPath.split('/').filter(Boolean).pop() ?? operation.entry.name,
+          path: operation.fromPath,
+        });
+        setRevealedFilePath(operation.fromPath);
+        setScrollTargetPath(operation.fromPath);
+        await refreshTreeAroundPaths([operation.fromPath, operation.toPath]);
+      }
+
+      setLastFileUndo(null);
+      void loadStatus({ silent: true });
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t('rightPanel.fileUndoSuccess') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileUndoFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
+  const revealWorkspacePathInExplorer = async (workspacePath: string) => {
+    if (!window.piDesktop) {
+      addToast({ type: 'warning', message: t('rightPanel.standaloneOnlyDesktop') });
+      return;
+    }
+
+    try {
+      const workspace = await piApi.getWorkspaceStatus(sessionId);
+      if (workspace.state !== 'ok') {
+        throw new Error(workspace.error ?? t('rightPanel.workspaceMissing'));
+      }
+      const result = await window.piDesktop.revealWorkspacePath(workspace.workDir, workspacePath);
+      if (!result.ok) {
+        throw new Error(result.error ?? t('rightPanel.revealInExplorerFailed'));
+      }
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.revealInExplorerFailedWithMessage', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
+  const openWorkspaceEntryStandalone = async (entry: WorkspaceTreeEntry) => {
+    if (entry.isDirectory) {
+      addToast({ type: 'warning', message: t('rightPanel.folderStandaloneUnsupported') });
+      return;
+    }
+    if (!window.piDesktop) {
+      addToast({ type: 'warning', message: t('rightPanel.standaloneOnlyDesktop') });
+      return;
+    }
+
+    try {
+      await window.piDesktop.openWorkspaceFileWindow(sessionId, entry.path);
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : String(err), duration: 6000 });
+    }
+  };
+
+  const detachWorkspaceEntryStandalone = async (entry: WorkspaceTreeEntry, screenPoint?: { x: number; y: number }) => {
+    if (entry.isDirectory) {
+      addToast({ type: 'warning', message: t('rightPanel.folderStandaloneUnsupported') });
+      return;
+    }
+    if (!window.piDesktop) {
+      addToast({ type: 'warning', message: t('rightPanel.standaloneOnlyDesktop') });
+      return;
+    }
+
+    try {
+      if (window.piDesktop.openWorkspaceFileDetachedWindow) {
+        await window.piDesktop.openWorkspaceFileDetachedWindow(sessionId, entry.path, screenPoint);
+      } else {
+        await window.piDesktop.openWorkspaceFileWindow(sessionId, entry.path);
+      }
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : String(err), duration: 6000 });
+    }
+  };
+
+  const deleteWorkspaceEntry = async (entry: WorkspaceTreeEntry) => {
+    const confirmed = window.confirm(t('rightPanel.fileDeleteConfirm', { path: entry.path }));
+    if (!confirmed) return;
+
+    try {
+      const result = await piApi.deleteWorkspacePath(sessionId, entry.path);
+      if (result.state !== 'ok') {
+        throw new Error(result.error ?? t('rightPanel.fileDeleteFailed'));
+      }
+
+      removePreviewTabsForPath(entry.path);
+      setRevealedFilePath((current) => current && isWorkspacePathWithin(current, entry.path) ? null : current);
+      setSelectedTreeEntry((current) => current && isWorkspacePathWithin(current.path, entry.path) ? null : current);
+      setFileClipboard((current) => current && isWorkspacePathWithin(current.entry.path, entry.path) ? null : current);
+      await refreshTreeAroundPaths([entry.path]);
+      void loadStatus({ silent: true });
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t('rightPanel.fileDeleted') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileOperationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
+  const moveWorkspaceEntry = async (payload: WorkspaceFileDragPayload, targetDirectory: string) => {
+    if (payload.sessionId !== sessionId) return;
+
+    try {
+      const result = await piApi.moveWorkspacePath(sessionId, payload.path, targetDirectory);
+      if (result.state !== 'ok') {
+        throw new Error(result.error ?? t('rightPanel.fileMoveFailed'));
+      }
+
+      removePreviewTabsForPath(payload.path);
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        next.add('');
+        const normalizedTarget = normalizeWorkspaceFilePath(targetDirectory);
+        if (normalizedTarget) next.add(normalizedTarget);
+        for (const parentPath of parentWorkspacePaths(result.targetPath)) {
+          next.add(parentPath);
+        }
+        return next;
+      });
+      setRevealedFilePath(result.targetPath);
+      setScrollTargetPath(result.targetPath);
+      setSelectedTreeEntry({
+        name: result.targetPath.split('/').filter(Boolean).pop() ?? payload.name,
+        path: result.targetPath,
+        isDirectory: payload.isDirectory,
+      });
+      setLastFileUndo({
+        kind: 'move',
+        fromPath: payload.path,
+        toPath: result.targetPath,
+        entry: {
+          name: payload.name,
+          path: payload.path,
+          isDirectory: payload.isDirectory,
+        },
+      });
+      await refreshTreeAroundPaths([payload.path, targetDirectory, result.targetPath]);
+      void loadStatus({ silent: true });
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t('rightPanel.fileMoved') });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.fileOperationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
   const handleMarkdownSaved = (tab: PreviewTab, content: string, result: WorkspaceWriteFileResult) => {
     if (tab.state !== 'file') return;
     setPreviewTabs((tabs) => tabs.map((item) => {
@@ -1113,6 +1650,113 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
       };
     }));
     void loadStatus({ silent: true });
+  };
+
+  const runWorkspaceGitOperation = async (action: WorkspaceGitOperationAction) => {
+    const message = commitMessage.trim();
+    if (action === 'commit' && !message) {
+      addToast({ type: 'warning', message: t('rightPanel.git.commitMessageRequired') });
+      return;
+    }
+
+    if (action === 'pull' && (status?.changedFiles.length ?? 0) > 0) {
+      const confirmed = window.confirm(t('rightPanel.git.pullWithChangesConfirm'));
+      if (!confirmed) return;
+    }
+
+    setBusyGitAction(action);
+    try {
+      const result = await piApi.applyWorkspaceGitOperation(sessionId, {
+        action,
+        message: action === 'commit' ? message : undefined,
+      });
+      if (result.state !== 'ok') {
+        throw new Error(result.error ?? t('rightPanel.git.operationUnknownError'));
+      }
+
+      setStatus(result.statusResult ?? await piApi.getWorkspaceStatus(sessionId));
+      setLastRefreshedAt(Date.now());
+      if (action === 'commit') setCommitMessage('');
+      window.dispatchEvent(new CustomEvent('pi:workspace-changed', { detail: { sessionId } }));
+      addToast({ type: 'success', message: t(`rightPanel.git.${action}.success` as TranslationKey) });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.git.operationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 7000,
+      });
+    } finally {
+      setBusyGitAction(null);
+    }
+  };
+
+  const applyChangeAction = async (file: WorkspaceChangedFile, action: WorkspaceChangeAction) => {
+    if (action === 'discard') {
+      const confirmed = window.confirm(t('rightPanel.discardChangeConfirm', { path: file.path }));
+      if (!confirmed) return;
+    }
+
+    const key = changedFileKey(file);
+    setBusyChangeKey(`${action}:${key}`);
+    try {
+      const result = await piApi.applyWorkspaceChange(sessionId, {
+        action,
+        path: file.path,
+        oldPath: file.oldPath,
+        status: file.status,
+      });
+      if (result.state !== 'ok') {
+        throw new Error(result.error ?? t('rightPanel.changeOperationUnknownError'));
+      }
+
+      setStatus(result.statusResult ?? await piApi.getWorkspaceStatus(sessionId));
+      setLastRefreshedAt(Date.now());
+      addToast({
+        type: 'success',
+        message: action === 'accept'
+          ? t('rightPanel.acceptedChange')
+          : action === 'unstage'
+            ? t('rightPanel.unstagedChange')
+            : t('rightPanel.discardedChange'),
+      });
+
+      const activeTarget = activePreview?.target;
+      if (activeTarget && (activeTarget.path === file.path || activeTarget.path === file.oldPath)) {
+        void openPreview(activeTarget);
+      }
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('rightPanel.changeOperationFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    } finally {
+      setBusyChangeKey(null);
+    }
+  };
+
+  const handleFilesKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (mode !== 'files') return;
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    if (isEditableEventTarget(event.target)) return;
+    if (window.getSelection()?.toString()) return;
+
+    const key = event.key.toLowerCase();
+    if (key === 'c') {
+      if (!selectedTreeEntry) return;
+      event.preventDefault();
+      copyWorkspaceEntryToClipboard(selectedTreeEntry);
+    } else if (key === 'x') {
+      if (!selectedTreeEntry) return;
+      event.preventDefault();
+      cutWorkspaceEntryToClipboard(selectedTreeEntry);
+    } else if (key === 'v') {
+      event.preventDefault();
+      void pasteWorkspaceClipboard(selectedTreeEntry);
+    } else if (key === 'z') {
+      event.preventDefault();
+      void undoWorkspaceFileOperation();
+    }
   };
 
   const workspacePanelStyle = workspaceCollapsed
@@ -1180,6 +1824,16 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
 
           {!workspaceCollapsed && (
             <>
+              {mode === 'changes' && (
+                <GitActionsBar
+                  status={status}
+                  busyAction={busyGitAction}
+                  commitMessage={commitMessage}
+                  onCommitMessageChange={setCommitMessage}
+                  onRunAction={(action) => void runWorkspaceGitOperation(action)}
+                />
+              )}
+
               <div className="px-3 py-2 border-b border-pi-border">
                 <label className="flex items-center gap-2 h-8 px-2 rounded-md bg-pi-bg-tertiary border border-pi-border focus-within:border-pi-accent transition-colors">
                   <Search size={13} className="text-pi-dim flex-shrink-0" />
@@ -1208,17 +1862,46 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
                     loading={statusLoading}
                     error={statusError}
                     files={filteredChanges}
+                    busyChangeKey={busyChangeKey}
                     onOpen={(path) => void openPreview({ kind: isMarkdownFile(path) ? 'file' : 'diff', path })}
+                    onAccept={(file) => void applyChangeAction(file, 'accept')}
+                    onUnstage={(file) => void applyChangeAction(file, 'unstage')}
+                    onDiscard={(file) => void applyChangeAction(file, 'discard')}
                   />
                 ) : (
                   <FilesTree
+                    sessionId={sessionId}
                     root={treeByPath['']}
                     treeByPath={treeByPath}
                     loadingByPath={treeLoadingByPath}
                     expandedPaths={expandedPaths}
                     query={query}
+                    revealedPath={revealedFilePath}
+                    scrollTargetPath={scrollTargetPath}
+                    selectedPath={selectedTreeEntry?.path ?? null}
+                    canPaste={Boolean(fileClipboard)}
+                    canUndo={Boolean(lastFileUndo)}
                     onToggle={toggleTreePath}
-                    onOpen={(path) => void openPreview({ kind: 'file', path })}
+                    onOpen={(path) => {
+                      setRevealedFilePath(path);
+                      void openPreview({ kind: 'file', path });
+                    }}
+                    onSelect={selectWorkspaceEntry}
+                    onScrollTargetSettled={(path) => {
+                      setScrollTargetPath((current) => current === path ? null : current);
+                    }}
+                    onMove={(payload, targetDirectory) => void moveWorkspaceEntry(payload, targetDirectory)}
+                    onAddToChat={addWorkspaceEntryToChat}
+                    onOpenStandalone={(entry) => void openWorkspaceEntryStandalone(entry)}
+                    onDetachStandalone={(entry, screenPoint) => void detachWorkspaceEntryStandalone(entry, screenPoint)}
+                    onRevealInExplorer={(entry) => void revealWorkspacePathInExplorer(entry.path)}
+                    onCopy={(entry) => copyWorkspaceEntryToClipboard(entry)}
+                    onCut={(entry) => cutWorkspaceEntryToClipboard(entry)}
+                    onPaste={(entry) => void pasteWorkspaceClipboard(entry)}
+                    onUndo={() => void undoWorkspaceFileOperation()}
+                    onCopyPath={(entry) => void copyWorkspaceEntryPath(entry)}
+                    onDelete={(entry) => void deleteWorkspaceEntry(entry)}
+                    onKeyDown={handleFilesKeyDown}
                   />
                 )}
               </div>
@@ -1258,11 +1941,13 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
         >
           {!previewCollapsed && (
             <PreviewTabs
+              sessionId={sessionId}
               tabs={previewTabs}
               activeId={activePreview?.id ?? null}
               onActivate={setActivePreviewId}
               onClose={closePreviewTab}
               onCloseTabs={closePreviewTabs}
+              onRevealInExplorer={(path) => void revealWorkspacePathInExplorer(path)}
             />
           )}
           <PreviewHeader
@@ -1293,18 +1978,147 @@ function WorkspaceBrowser({ sessionId, initialMode }: { sessionId: string; initi
   );
 }
 
+function GitActionsBar({
+  status,
+  busyAction,
+  commitMessage,
+  onCommitMessageChange,
+  onRunAction,
+}: {
+  status: WorkspaceStatusResult | null;
+  busyAction: WorkspaceGitOperationAction | null;
+  commitMessage: string;
+  onCommitMessageChange: (value: string) => void;
+  onRunAction: (action: WorkspaceGitOperationAction) => void;
+}) {
+  const { t } = useI18n();
+  const isReady = status?.state === 'ok';
+  const hasStaged = Boolean(status?.hasStagedChanges);
+  const hasUnstaged = Boolean(status?.hasUnstagedChanges);
+  const isBusy = Boolean(busyAction);
+  const ahead = status?.ahead ?? 0;
+  const behind = status?.behind ?? 0;
+
+  return (
+    <div className="border-b border-pi-border bg-pi-bg-secondary/45 px-3 py-2">
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <GitActionButton
+          icon={Download}
+          label={t('rightPanel.git.pull')}
+          busy={busyAction === 'pull'}
+          disabled={!isReady || isBusy}
+          onClick={() => onRunAction('pull')}
+        />
+        <GitActionButton
+          icon={Upload}
+          label={t('rightPanel.git.push')}
+          busy={busyAction === 'push'}
+          disabled={!isReady || isBusy}
+          onClick={() => onRunAction('push')}
+        />
+        <GitActionButton
+          icon={Check}
+          label={t('rightPanel.git.stageAll')}
+          busy={busyAction === 'stage_all'}
+          disabled={!isReady || isBusy || !hasUnstaged}
+          onClick={() => onRunAction('stage_all')}
+        />
+        <GitActionButton
+          icon={RotateCcw}
+          label={t('rightPanel.git.unstageAll')}
+          busy={busyAction === 'unstage_all'}
+          disabled={!isReady || isBusy || !hasStaged}
+          onClick={() => onRunAction('unstage_all')}
+        />
+        {(ahead > 0 || behind > 0) && (
+          <span className="ml-auto rounded-full border border-pi-border/70 bg-pi-bg-tertiary px-2 py-1 text-[10px] text-pi-dim">
+            {ahead > 0 && t('rightPanel.git.ahead', { count: ahead })}
+            {ahead > 0 && behind > 0 ? ' · ' : ''}
+            {behind > 0 && t('rightPanel.git.behind', { count: behind })}
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <input
+          value={commitMessage}
+          onChange={(event) => onCommitMessageChange(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+              onRunAction('commit');
+            }
+          }}
+          disabled={!isReady || isBusy}
+          placeholder={t('rightPanel.git.commitPlaceholder')}
+          className="h-8 min-w-0 flex-1 rounded-xl border border-pi-border bg-pi-bg-tertiary px-3 text-xs text-pi-text placeholder:text-pi-dim outline-none transition-colors focus:border-pi-accent disabled:opacity-60"
+        />
+        <GitActionButton
+          icon={GitBranch}
+          label={t('rightPanel.git.commit')}
+          busy={busyAction === 'commit'}
+          disabled={!isReady || isBusy || !hasStaged || !commitMessage.trim()}
+          onClick={() => onRunAction('commit')}
+          primary
+        />
+      </div>
+    </div>
+  );
+}
+
+function GitActionButton({
+  icon: Icon,
+  label,
+  busy,
+  disabled,
+  primary,
+  onClick,
+}: {
+  icon: typeof File;
+  label: string;
+  busy?: boolean;
+  disabled?: boolean;
+  primary?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'inline-flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-[11px] font-medium shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        primary
+          ? 'border-pi-accent/30 bg-pi-accent text-white hover:bg-pi-accent/90'
+          : 'border-pi-border/70 bg-pi-bg-tertiary/80 text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
+      )}
+      title={label}
+    >
+      {busy ? <RefreshCw size={12} className="animate-spin" /> : <Icon size={12} />}
+      <span>{label}</span>
+    </button>
+  );
+}
+
 function ChangesList({
   status,
   loading,
   error,
   files,
+  busyChangeKey,
   onOpen,
+  onAccept,
+  onUnstage,
+  onDiscard,
 }: {
   status: WorkspaceStatusResult | null;
   loading: boolean;
   error: string | null;
   files: WorkspaceChangedFile[];
+  busyChangeKey: string | null;
   onOpen: (path: string) => void;
+  onAccept: (file: WorkspaceChangedFile) => void;
+  onUnstage: (file: WorkspaceChangedFile) => void;
+  onDiscard: (file: WorkspaceChangedFile) => void;
 }) {
   const { t } = useI18n();
   if (loading && !status) return <PanelInline icon={RefreshCw} message={t('rightPanel.loadingWorkspace')} spinning />;
@@ -1316,9 +2130,23 @@ function ChangesList({
 
   return (
     <div className="py-1">
-      {files.map((file) => (
-        <ChangedFileRow key={`${file.status}:${file.path}:${file.oldPath ?? ''}`} file={file} onOpen={onOpen} />
-      ))}
+      {files.map((file) => {
+        const fileKey = changedFileKey(file);
+        const busyAction = busyChangeKey?.endsWith(`:${fileKey}`)
+          ? (busyChangeKey.split(':', 1)[0] as WorkspaceChangeAction)
+          : null;
+        return (
+          <ChangedFileRow
+            key={fileKey}
+            file={file}
+            busyAction={busyAction}
+            onOpen={onOpen}
+            onAccept={onAccept}
+            onUnstage={onUnstage}
+            onDiscard={onDiscard}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -1411,20 +2239,58 @@ function WorkspaceSummary({
   );
 }
 
-function ChangedFileRow({ file, onOpen }: { file: WorkspaceChangedFile; onOpen: (path: string) => void }) {
+function ChangedFileRow({
+  file,
+  busyAction,
+  onOpen,
+  onAccept,
+  onUnstage,
+  onDiscard,
+}: {
+  file: WorkspaceChangedFile;
+  busyAction: WorkspaceChangeAction | null;
+  onOpen: (path: string) => void;
+  onAccept: (file: WorkspaceChangedFile) => void;
+  onUnstage: (file: WorkspaceChangedFile) => void;
+  onDiscard: (file: WorkspaceChangedFile) => void;
+}) {
   const { t } = useI18n();
   const meta = STATUS_META[file.status];
+  const isBusy = Boolean(busyAction);
+  const isStageDisabled = isBusy || (file.staged && !file.unstaged);
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onOpen(file.path);
+    }
+  };
+
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => onOpen(file.path)}
-      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-pi-bg-hover transition-colors group"
+      onKeyDown={handleKeyDown}
+      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-pi-bg-hover transition-colors group outline-none focus-visible:bg-pi-selected-bg"
       title={file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}
     >
       <span className={cn('w-5 h-5 rounded border flex items-center justify-center text-[10px] font-semibold flex-shrink-0', meta.className)}>
         {meta.label}
       </span>
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-pi-text truncate group-hover:text-pi-accent transition-colors">{file.path}</div>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-xs text-pi-text transition-colors group-hover:text-pi-accent">{file.path}</span>
+          {file.staged && (
+            <span className="flex-shrink-0 rounded-full bg-pi-success/10 px-1.5 py-0.5 text-[9px] font-medium text-pi-success">
+              {t('rightPanel.git.stagedBadge')}
+            </span>
+          )}
+          {file.unstaged && file.staged && (
+            <span className="flex-shrink-0 rounded-full bg-pi-warning/10 px-1.5 py-0.5 text-[9px] font-medium text-pi-warning">
+              {t('rightPanel.git.unstagedBadge')}
+            </span>
+          )}
+        </div>
         {file.oldPath && <div className="text-[10px] text-pi-dim truncate">{t('rightPanel.fromPath', { path: file.oldPath })}</div>}
       </div>
       {(file.additions > 0 || file.deletions > 0) && (
@@ -1433,70 +2299,277 @@ function ChangedFileRow({ file, onOpen }: { file: WorkspaceChangedFile; onOpen: 
           <span className="text-pi-error">-{file.deletions}</span>
         </div>
       )}
-    </button>
+      <div className="ml-1 flex flex-shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        <button
+          type="button"
+          disabled={isStageDisabled}
+          onClick={(event) => {
+            event.stopPropagation();
+            onAccept(file);
+          }}
+          className="flex h-6 w-6 items-center justify-center rounded-md border border-pi-border/70 bg-pi-bg-secondary/80 text-pi-dim shadow-sm transition-colors hover:border-pi-success/50 hover:bg-pi-success/10 hover:text-pi-success disabled:cursor-not-allowed disabled:opacity-60"
+          title={t('rightPanel.acceptChange')}
+        >
+          {busyAction === 'accept' ? <RefreshCw size={12} className="animate-spin" /> : <Check size={12} />}
+        </button>
+        <button
+          type="button"
+          disabled={isBusy || !file.staged}
+          onClick={(event) => {
+            event.stopPropagation();
+            onUnstage(file);
+          }}
+          className="flex h-6 w-6 items-center justify-center rounded-md border border-pi-border/70 bg-pi-bg-secondary/80 text-pi-dim shadow-sm transition-colors hover:border-pi-warning/50 hover:bg-pi-warning/10 hover:text-pi-warning disabled:cursor-not-allowed disabled:opacity-60"
+          title={t('rightPanel.unstageChange')}
+        >
+          {busyAction === 'unstage' ? <RefreshCw size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+        </button>
+        <button
+          type="button"
+          disabled={isBusy}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDiscard(file);
+          }}
+          className="flex h-6 w-6 items-center justify-center rounded-md border border-pi-border/70 bg-pi-bg-secondary/80 text-pi-dim shadow-sm transition-colors hover:border-pi-error/50 hover:bg-pi-error/10 hover:text-pi-error disabled:cursor-not-allowed disabled:opacity-60"
+          title={t('rightPanel.discardChange')}
+        >
+          {busyAction === 'discard' ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
+        </button>
+      </div>
+    </div>
   );
 }
 
 function FilesTree({
+  sessionId,
   root,
   treeByPath,
   loadingByPath,
   expandedPaths,
   query,
+  revealedPath,
+  scrollTargetPath,
+  selectedPath,
+  canPaste,
+  canUndo,
   onToggle,
   onOpen,
+  onSelect,
+  onScrollTargetSettled,
+  onMove,
+  onAddToChat,
+  onOpenStandalone,
+  onDetachStandalone,
+  onRevealInExplorer,
+  onCopy,
+  onCut,
+  onPaste,
+  onUndo,
+  onCopyPath,
+  onDelete,
+  onKeyDown,
 }: {
+  sessionId: string;
   root?: WorkspaceTreeResult;
   treeByPath: Record<string, WorkspaceTreeResult>;
   loadingByPath: Record<string, boolean>;
   expandedPaths: Set<string>;
   query: string;
+  revealedPath: string | null;
+  scrollTargetPath: string | null;
+  selectedPath: string | null;
+  canPaste: boolean;
+  canUndo: boolean;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
+  onSelect: (entry: WorkspaceTreeEntry) => void;
+  onScrollTargetSettled: (path: string) => void;
+  onMove: (payload: WorkspaceFileDragPayload, targetDirectory: string) => void;
+  onAddToChat: (entry: WorkspaceTreeEntry) => void;
+  onOpenStandalone: (entry: WorkspaceTreeEntry) => void;
+  onDetachStandalone: (entry: WorkspaceTreeEntry, screenPoint?: { x: number; y: number }) => void;
+  onRevealInExplorer: (entry: WorkspaceTreeEntry) => void;
+  onCopy: (entry: WorkspaceTreeEntry) => void;
+  onCut: (entry: WorkspaceTreeEntry) => void;
+  onPaste: (entry: WorkspaceTreeEntry | null) => void;
+  onUndo: () => void;
+  onCopyPath: (entry: WorkspaceTreeEntry) => void;
+  onDelete: (entry: WorkspaceTreeEntry) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
 }) {
   const { t } = useI18n();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: WorkspaceTreeEntry } | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const close = () => setContextMenu(null);
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+
+    window.addEventListener('click', close);
+    window.addEventListener('resize', close);
+    window.addEventListener('blur', close);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('blur', close);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
+
   if (loadingByPath[''] && !root) return <PanelInline icon={RefreshCw} message={t('rightPanel.loadingFiles')} spinning />;
   if (!root) return <PanelInline icon={FolderTree} message={t('rightPanel.fileTreeUnavailable')} />;
   if (root.state === 'missing') return <PanelInline icon={Folder} message={t('rightPanel.workspaceFolderMissing')} tone="error" />;
   if (root.state === 'error') return <PanelInline icon={Folder} message={root.error ?? t('rightPanel.unableLoadFiles')} tone="error" />;
   if (root.entries.length === 0) return <PanelInline icon={FolderOpen} message={t('rightPanel.noFilesFound')} />;
 
+  const handleRootDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasWorkspaceFileDragPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleRootDrop = (event: DragEvent<HTMLDivElement>) => {
+    const payload = readWorkspaceFileDragPayload(event.dataTransfer);
+    if (!payload || payload.sessionId !== sessionId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onMove(payload, '');
+  };
+
   return (
-    <div className="py-1">
+    <div
+      className="py-1 outline-none"
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      onDragOver={handleRootDragOver}
+      onDrop={handleRootDrop}
+    >
       <TreeEntries
+        sessionId={sessionId}
         entries={root.entries}
         treeByPath={treeByPath}
         loadingByPath={loadingByPath}
         expandedPaths={expandedPaths}
         query={query.trim().toLowerCase()}
+        revealedPath={revealedPath}
+        scrollTargetPath={scrollTargetPath}
+        selectedPath={selectedPath}
         depth={0}
         onToggle={onToggle}
         onOpen={onOpen}
+        onSelect={onSelect}
+        onScrollTargetSettled={onScrollTargetSettled}
+        onMove={onMove}
+        onAddToChat={onAddToChat}
+        onOpenStandalone={onOpenStandalone}
+        onDetachStandalone={onDetachStandalone}
+        onContextMenu={(event, entry) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onSelect(entry);
+          setContextMenu({ x: event.clientX, y: event.clientY, entry });
+        }}
       />
+      {contextMenu && typeof document !== 'undefined' && createPortal(
+        <WorkspaceFileContextMenu
+          state={contextMenu}
+          onOpen={(entry) => {
+            setContextMenu(null);
+            entry.isDirectory ? onToggle(entry.path) : onOpen(entry.path);
+          }}
+          onAddToChat={(entry) => {
+            setContextMenu(null);
+            onAddToChat(entry);
+          }}
+          onOpenStandalone={(entry) => {
+            setContextMenu(null);
+            onOpenStandalone(entry);
+          }}
+          onRevealInExplorer={(entry) => {
+            setContextMenu(null);
+            onRevealInExplorer(entry);
+          }}
+          onCopyPath={(entry) => {
+            setContextMenu(null);
+            onCopyPath(entry);
+          }}
+          onCopy={(entry) => {
+            setContextMenu(null);
+            onCopy(entry);
+          }}
+          onCut={(entry) => {
+            setContextMenu(null);
+            onCut(entry);
+          }}
+          onPaste={(entry) => {
+            setContextMenu(null);
+            onPaste(entry);
+          }}
+          onUndo={() => {
+            setContextMenu(null);
+            onUndo();
+          }}
+          canPaste={canPaste}
+          canUndo={canUndo}
+          onDelete={(entry) => {
+            setContextMenu(null);
+            onDelete(entry);
+          }}
+        />,
+        document.body
+      )}
     </div>
   );
 }
 
 function TreeEntries({
+  sessionId,
   entries,
   treeByPath,
   loadingByPath,
   expandedPaths,
   query,
+  revealedPath,
+  scrollTargetPath,
+  selectedPath,
   depth,
   onToggle,
   onOpen,
+  onSelect,
+  onScrollTargetSettled,
+  onMove,
+  onAddToChat,
+  onOpenStandalone,
+  onDetachStandalone,
+  onContextMenu,
 }: {
+  sessionId: string;
   entries: WorkspaceTreeEntry[];
   treeByPath: Record<string, WorkspaceTreeResult>;
   loadingByPath: Record<string, boolean>;
   expandedPaths: Set<string>;
   query: string;
+  revealedPath: string | null;
+  scrollTargetPath: string | null;
+  selectedPath: string | null;
   depth: number;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
+  onSelect: (entry: WorkspaceTreeEntry) => void;
+  onScrollTargetSettled: (path: string) => void;
+  onMove: (payload: WorkspaceFileDragPayload, targetDirectory: string) => void;
+  onAddToChat: (entry: WorkspaceTreeEntry) => void;
+  onOpenStandalone: (entry: WorkspaceTreeEntry) => void;
+  onDetachStandalone: (entry: WorkspaceTreeEntry, screenPoint?: { x: number; y: number }) => void;
+  onContextMenu: (event: MouseEvent<HTMLButtonElement>, entry: WorkspaceTreeEntry) => void;
 }) {
   const { t } = useI18n();
+  const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const visible = entries.filter((entry) => !query || entry.path.toLowerCase().includes(query) || entry.name.toLowerCase().includes(query) || entry.isDirectory);
 
   return (
@@ -1506,13 +2579,83 @@ function TreeEntries({
         const childTree = treeByPath[entry.path];
         const loading = loadingByPath[entry.path];
         const Icon = entry.isDirectory ? (expanded ? FolderOpen : Folder) : File;
+        const revealed = revealedPath === entry.path;
+        const selected = selectedPath === entry.path;
+        const dropTarget = dropTargetPath === entry.path;
+        const stickyFolder = entry.isDirectory && expanded;
+        const stickyDepth = Math.min(depth, WORKSPACE_TREE_STICKY_MAX_DEPTH);
 
         return (
           <div key={entry.path}>
             <button
-              onClick={() => entry.isDirectory ? onToggle(entry.path) : onOpen(entry.path)}
-              className="w-full flex items-center gap-1.5 h-7 pr-2 text-left text-xs text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover transition-colors"
-              style={{ paddingLeft: 8 + depth * 14 }}
+              draggable
+              ref={(node) => {
+                if (node && scrollTargetPath === entry.path) {
+                  window.requestAnimationFrame(() => {
+                    node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    onScrollTargetSettled(entry.path);
+                  });
+                }
+              }}
+              onClick={() => {
+                onSelect(entry);
+                entry.isDirectory ? onToggle(entry.path) : onOpen(entry.path);
+              }}
+              onContextMenuCapture={(event) => onContextMenu(event, entry)}
+              onDragStart={(event) => {
+                setWorkspaceFileDragData(
+                  event.dataTransfer,
+                  createWorkspaceFileDragPayload(sessionId, entry)
+                );
+              }}
+              onDragEnd={(event) => {
+                if (event.dataTransfer.dropEffect !== 'none') return;
+                if (entry.isDirectory || !window.piDesktop || !shouldDetachWorkspaceDrag(event)) return;
+                onDetachStandalone(entry, { x: event.screenX, y: event.screenY });
+              }}
+              onDragOver={(event) => {
+                if (!hasWorkspaceFileDragPayload(event.dataTransfer)) return;
+                if (!entry.isDirectory) {
+                  event.stopPropagation();
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                event.dataTransfer.dropEffect = 'move';
+                setDropTargetPath(entry.path);
+              }}
+              onDragLeave={(event) => {
+                if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+                setDropTargetPath((current) => current === entry.path ? null : current);
+              }}
+              onDrop={(event) => {
+                const payload = readWorkspaceFileDragPayload(event.dataTransfer);
+                if (!payload || payload.sessionId !== sessionId) return;
+                if (!entry.isDirectory) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                setDropTargetPath(null);
+                if (isWorkspacePathWithin(entry.path, payload.path)) return;
+                onMove(payload, entry.path);
+              }}
+              className={cn(
+                'group w-full flex items-center gap-1.5 h-7 pr-2 text-left text-xs transition-colors',
+                stickyFolder && 'sticky shadow-[0_1px_0_var(--pi-border)] backdrop-blur supports-[backdrop-filter]:bg-pi-bg/85',
+                stickyFolder && !dropTarget && !(revealed || selected) && 'bg-pi-bg/95',
+                dropTarget && 'bg-pi-accent/10 text-pi-accent ring-1 ring-inset ring-pi-accent/40',
+                (revealed || selected)
+                  ? 'bg-pi-selected-bg text-pi-accent ring-1 ring-inset ring-pi-accent/35'
+                  : 'text-pi-muted hover:text-pi-text hover:bg-pi-bg-hover'
+              )}
+              style={{
+                paddingLeft: 8 + depth * 14,
+                top: stickyFolder ? stickyDepth * WORKSPACE_TREE_ROW_HEIGHT : undefined,
+                zIndex: stickyFolder ? 50 + stickyDepth : undefined,
+              }}
               title={entry.path}
             >
               {entry.isDirectory ? (
@@ -1522,18 +2665,41 @@ function TreeEntries({
               )}
               <Icon size={13} className={entry.isDirectory ? 'text-pi-accent flex-shrink-0' : 'text-pi-dim flex-shrink-0'} />
               <span className="truncate">{entry.name}</span>
+              {!entry.isDirectory && (
+                <span
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onAddToChat(entry);
+                  }}
+                  className="ml-auto hidden h-5 w-5 items-center justify-center rounded text-pi-dim hover:bg-pi-bg-tertiary hover:text-pi-accent group-hover:flex"
+                  title={t('rightPanel.addToChat')}
+                >
+                  <MessageSquarePlus size={11} />
+                </span>
+              )}
               {loading && <RefreshCw size={10} className="animate-spin text-pi-dim ml-auto" />}
             </button>
             {entry.isDirectory && expanded && childTree?.state === 'ok' && (
               <TreeEntries
+                sessionId={sessionId}
                 entries={childTree.entries}
                 treeByPath={treeByPath}
                 loadingByPath={loadingByPath}
                 expandedPaths={expandedPaths}
                 query={query}
+                revealedPath={revealedPath}
+                scrollTargetPath={scrollTargetPath}
+                selectedPath={selectedPath}
                 depth={depth + 1}
                 onToggle={onToggle}
                 onOpen={onOpen}
+                onSelect={onSelect}
+                onScrollTargetSettled={onScrollTargetSettled}
+                onMove={onMove}
+                onAddToChat={onAddToChat}
+                onOpenStandalone={onOpenStandalone}
+                onDetachStandalone={onDetachStandalone}
+                onContextMenu={onContextMenu}
               />
             )}
             {entry.isDirectory && expanded && childTree?.state === 'error' && (
@@ -1548,18 +2714,140 @@ function TreeEntries({
   );
 }
 
+function WorkspaceFileContextMenu({
+  state,
+  onOpen,
+  onAddToChat,
+  onOpenStandalone,
+  onRevealInExplorer,
+  onCopy,
+  onCut,
+  onPaste,
+  onUndo,
+  onCopyPath,
+  onDelete,
+  canPaste,
+  canUndo,
+}: {
+  state: { x: number; y: number; entry: WorkspaceTreeEntry };
+  onOpen: (entry: WorkspaceTreeEntry) => void;
+  onAddToChat: (entry: WorkspaceTreeEntry) => void;
+  onOpenStandalone: (entry: WorkspaceTreeEntry) => void;
+  onRevealInExplorer: (entry: WorkspaceTreeEntry) => void;
+  onCopy: (entry: WorkspaceTreeEntry) => void;
+  onCut: (entry: WorkspaceTreeEntry) => void;
+  onPaste: (entry: WorkspaceTreeEntry) => void;
+  onUndo: () => void;
+  onCopyPath: (entry: WorkspaceTreeEntry) => void;
+  onDelete: (entry: WorkspaceTreeEntry) => void;
+  canPaste: boolean;
+  canUndo: boolean;
+}) {
+  const { t } = useI18n();
+  const menuLeft = typeof window === 'undefined'
+    ? state.x
+    : Math.min(state.x, Math.max(8, window.innerWidth - 232));
+  const menuTop = typeof window === 'undefined'
+    ? state.y
+    : Math.min(state.y, Math.max(8, window.innerHeight - 348));
+  const entry = state.entry;
+
+  return (
+    <div
+      className="fixed z-[110] w-56 overflow-hidden rounded-lg border border-pi-border bg-pi-bg-secondary/95 py-1 shadow-2xl shadow-black/30 backdrop-blur-xl"
+      style={{ left: menuLeft, top: menuTop }}
+      onClick={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <WorkspaceFileMenuButton icon={entry.isDirectory ? FolderOpen : File} label={t('rightPanel.fileMenu.open')} onClick={() => onOpen(entry)} />
+      <WorkspaceFileMenuButton
+        icon={MessageSquarePlus}
+        label={t('rightPanel.fileMenu.addToChat')}
+        disabled={entry.isDirectory}
+        onClick={() => onAddToChat(entry)}
+      />
+      <WorkspaceFileMenuButton
+        icon={ExternalLink}
+        label={t('rightPanel.fileMenu.openStandalone')}
+        disabled={entry.isDirectory}
+        onClick={() => onOpenStandalone(entry)}
+      />
+      <WorkspaceFileMenuButton
+        icon={FolderOpen}
+        label={t('rightPanel.fileMenu.revealInExplorer')}
+        onClick={() => onRevealInExplorer(entry)}
+      />
+      <div className="my-1 h-px bg-pi-border/70" />
+      <WorkspaceFileMenuButton icon={Copy} label={t('rightPanel.fileMenu.copy')} onClick={() => onCopy(entry)} />
+      <WorkspaceFileMenuButton icon={Scissors} label={t('rightPanel.fileMenu.cut')} onClick={() => onCut(entry)} />
+      <WorkspaceFileMenuButton
+        icon={ClipboardPaste}
+        label={t('rightPanel.fileMenu.paste')}
+        disabled={!canPaste}
+        onClick={() => onPaste(entry)}
+      />
+      <WorkspaceFileMenuButton
+        icon={RotateCcw}
+        label={t('rightPanel.fileMenu.undo')}
+        disabled={!canUndo}
+        onClick={onUndo}
+      />
+      <div className="my-1 h-px bg-pi-border/70" />
+      <WorkspaceFileMenuButton icon={Copy} label={t('rightPanel.fileMenu.copyPath')} onClick={() => onCopyPath(entry)} />
+      <WorkspaceFileMenuButton icon={Trash2} label={t('rightPanel.fileMenu.delete')} tone="danger" onClick={() => onDelete(entry)} />
+    </div>
+  );
+}
+
+function WorkspaceFileMenuButton({
+  icon: Icon,
+  label,
+  disabled = false,
+  tone = 'normal',
+  onClick,
+}: {
+  icon: typeof File;
+  label: string;
+  disabled?: boolean;
+  tone?: 'normal' | 'danger';
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        'flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-45',
+        tone === 'danger'
+          ? 'text-pi-error hover:bg-pi-error/10'
+          : 'text-pi-muted hover:bg-pi-bg-hover hover:text-pi-text'
+      )}
+    >
+      <Icon size={13} className="flex-shrink-0" />
+      <span className="truncate">{label}</span>
+    </button>
+  );
+}
+
 function PreviewTabs({
+  sessionId,
   tabs,
   activeId,
   onActivate,
   onClose,
   onCloseTabs,
+  onRevealInExplorer,
 }: {
+  sessionId: string;
   tabs: PreviewTab[];
   activeId: string | null;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
   onCloseTabs: (scope: PreviewTabCloseScope, id: string) => void;
+  onRevealInExplorer: (path: string) => void;
 }) {
   const { t } = useI18n();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
@@ -1602,6 +2890,13 @@ function PreviewTabs({
     onCloseTabs(scope, contextMenu.tabId);
     setContextMenu(null);
   };
+  const revealContextTab = () => {
+    if (!contextMenu) return;
+    const tab = tabs.find((item) => item.id === contextMenu.tabId);
+    if (!tab) return;
+    onRevealInExplorer(tab.target.path);
+    setContextMenu(null);
+  };
 
   return (
     <>
@@ -1609,6 +2904,15 @@ function PreviewTabs({
         {tabs.map((tab) => (
           <button
             key={tab.id}
+            draggable
+            onDragStart={(event) => {
+              setWorkspaceFileDragData(event.dataTransfer, {
+                sessionId,
+                path: tab.target.path,
+                name: tab.title,
+                isDirectory: false,
+              });
+            }}
             onClick={() => onActivate(tab.id)}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -1644,8 +2948,12 @@ function PreviewTabs({
           className="fixed z-50 w-44 overflow-hidden rounded-md border border-pi-border bg-pi-bg-secondary py-1 shadow-xl"
           style={{ left: menuLeft, top: menuTop }}
           onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
+          <PreviewTabMenuButton label={t('rightPanel.fileMenu.revealInExplorer')} onClick={revealContextTab} />
+          <div className="my-1 h-px bg-pi-border" />
           <PreviewTabMenuButton label={t('common.close')} onClick={() => runTabAction('current')} />
           <PreviewTabMenuButton label={t('common.closeOthers')} disabled={tabs.length <= 1} onClick={() => runTabAction('others')} />
           <PreviewTabMenuButton label={t('common.closeTabsLeft')} disabled={menuIndex === 0} onClick={() => runTabAction('left')} />
@@ -1966,6 +3274,7 @@ function summarizeMessage(message: ChatMessage): string {
       if (part.type === 'tool_use') return `[tool: ${part.toolUse?.name ?? 'tool'}]`;
       if (part.type === 'tool_result') return part.toolResult?.isError ? '[tool error]' : '[tool result]';
       if (part.type === 'thinking') return part.thinking?.content ?? '';
+      if (part.type === 'image') return `[image: ${part.image?.fileName ?? part.image?.mimeType ?? 'image'}]`;
       return '';
     })
     .filter(Boolean)
@@ -1981,6 +3290,73 @@ function summarizeMessage(message: ChatMessage): string {
 
 function previewTabId(target: PreviewTarget): string {
   return `${target.kind}:${target.path}`;
+}
+
+function changedFileKey(file: WorkspaceChangedFile): string {
+  return `${file.status}:${file.path}:${file.oldPath ?? ''}`;
+}
+
+function normalizeWorkspaceFilePath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+}
+
+function immediateParentWorkspacePath(filePath: string): string {
+  const parts = normalizeWorkspaceFilePath(filePath).split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
+function workspacePasteTargetDirectory(entry: WorkspaceTreeEntry | null | undefined): string {
+  if (!entry) return '';
+  return entry.isDirectory ? entry.path : immediateParentWorkspacePath(entry.path);
+}
+
+function parentWorkspacePaths(filePath: string): string[] {
+  const parts = normalizeWorkspaceFilePath(filePath).split('/').filter(Boolean);
+  const parents: string[] = [];
+  for (let index = 1; index < parts.length; index += 1) {
+    parents.push(parts.slice(0, index).join('/'));
+  }
+  return parents;
+}
+
+function isWorkspacePathWithin(candidatePath: string, containerPath: string): boolean {
+  const candidate = normalizeWorkspaceFilePath(candidatePath);
+  const container = normalizeWorkspaceFilePath(containerPath);
+  if (!candidate || !container) return candidate === container;
+  return candidate === container || candidate.startsWith(`${container}/`);
+}
+
+function isDragEndOutsideWindow(event: DragEvent<HTMLElement>): boolean {
+  if (typeof window === 'undefined') return false;
+  const left = window.screenX;
+  const top = window.screenY;
+  const right = left + window.outerWidth;
+  const bottom = top + window.outerHeight;
+  return event.screenX < left || event.screenX > right || event.screenY < top || event.screenY > bottom;
+}
+
+function shouldDetachWorkspaceDrag(event: DragEvent<HTMLElement>): boolean {
+  if (isDragEndOutsideWindow(event)) return true;
+  if (typeof window === 'undefined') return false;
+
+  const { clientX, clientY } = event;
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+
+  const edgePadding = 1;
+  return (
+    clientX <= edgePadding ||
+    clientY <= edgePadding ||
+    clientX >= window.innerWidth - edgePadding ||
+    clientY >= window.innerHeight - edgePadding
+  );
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
 }
 
 function previewTitle(target: PreviewTarget): string {
@@ -2051,6 +3427,7 @@ function estimateContextTokens(messages: ChatMessage[]): number {
     const text = message.content.map((part) => {
       if (part.type === 'text') return part.text ?? '';
       if (part.type === 'thinking') return part.thinking?.content ?? '';
+      if (part.type === 'image') return `[image: ${part.image?.fileName ?? part.image?.mimeType ?? 'image'}]`;
       if (part.type === 'tool_use') return JSON.stringify(part.toolUse?.args ?? {});
       if (part.type === 'tool_result') return part.toolResult?.content ?? '';
       return '';

@@ -6,21 +6,37 @@ import { Shield, AlertTriangle, Check, X, CheckCheck, FileText, Terminal, Folder
 import { useI18n, type TranslationKey } from '../../lib/i18n';
 import { cn } from '../shared/utils';
 
-export function PermissionOverlay() {
+export function PermissionInlineCard({
+  permission,
+  className,
+}: {
+  permission: PermissionRequest & { sessionId: string };
+  className?: string;
+}) {
+  return (
+    <PermissionCard
+      permission={permission}
+      className={cn('w-full animate-fade-in shadow-lg shadow-black/20', className)}
+    />
+  );
+}
+
+function PermissionCard({
+  permission,
+  className,
+}: {
+  permission: PermissionRequest & { sessionId: string };
+  className?: string;
+}) {
   const { t } = useI18n();
-  const pendingPermission = useChatStore((s) => s.pendingPermission);
   const setPendingPermission = useChatStore((s) => s.setPendingPermission);
   const [rememberScope, setRememberScope] = useState<PermissionScope>('session');
 
   useEffect(() => {
-    if (pendingPermission) {
-      setRememberScope(defaultPermissionScope(pendingPermission.preview));
-    }
-  }, [pendingPermission?.requestId, pendingPermission?.preview]);
+    setRememberScope(defaultPermissionScope(permission.preview));
+  }, [permission.requestId, permission.preview]);
 
-  if (!pendingPermission) return null;
-
-  const { requestId, toolName, message, risk, args, sessionId, preview } = pendingPermission;
+  const { requestId, toolName, message, risk, args, sessionId, preview } = permission;
 
   const handleAllow = () => {
     piApi.send({
@@ -64,13 +80,13 @@ export function PermissionOverlay() {
   const RiskIcon = riskIcons[risk];
 
   return (
-    <div className="absolute inset-0 z-40 flex items-end justify-center pb-6 bg-black/20">
-      <div
-        className={cn(
-          'w-full max-w-xl border rounded-xl shadow-2xl p-4 mx-4 animate-slide-in-right',
-          riskColors[risk]
-        )}
-      >
+    <div
+      className={cn(
+        'rounded-xl border p-4',
+        riskColors[risk],
+        className
+      )}
+    >
         {/* Header */}
         <div className="flex items-start gap-3 mb-3">
           <div
@@ -184,7 +200,6 @@ export function PermissionOverlay() {
           </button>
           </div>
         </div>
-      </div>
     </div>
   );
 }

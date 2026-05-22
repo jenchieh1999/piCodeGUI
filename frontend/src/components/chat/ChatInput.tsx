@@ -16,6 +16,11 @@ import type {
   ImageAttachment,
   ModelInfo,
   PermissionMode,
+  PromptOptimizeFileReference,
+  PromptOptimizeImageReference,
+  PromptOptimizeMode,
+  PromptOptimizeSessionContext,
+  PromptOptimizeWorkspaceContext,
   Session,
   SlashCommandInfo,
   ThinkingLevel,
@@ -24,31 +29,39 @@ import type {
 } from '../../types';
 import { piApi } from '../../api/client';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
+import { createNewSessionFromPicker, openProjectsLauncher } from '../../lib/sessionActions';
+import { hasWorkspaceFileDragPayload, readWorkspaceFileDragPayload, type WorkspaceFileDragPayload } from '../../lib/workspaceDrag';
 import { useUIStore } from '../../stores/uiStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useModelStore } from '../../stores/modelStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useAgentRoomStore } from '../../stores/agentRoomStore';
 import { cn } from '../shared/utils';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import {
   AtSign,
   Bot,
   Brain,
+  Check,
+  ChevronDown,
   Command,
   FileText,
   Gauge,
   Image as ImageIcon,
   Loader2,
+  Network,
   Paperclip,
   Search,
   Send,
   Shield,
+  Sparkles,
   Square,
+  Undo2,
   X,
 } from 'lucide-react';
 
 interface ChatInputProps {
-  onSend: (text: string, images?: Array<{ data: string; mimeType: string }>, displayText?: string) => boolean | void;
+  onSend: (text: string, images?: ImageAttachment[], displayText?: string) => boolean | void;
   onStop: () => void;
   isStreaming: boolean;
   sessionId: string;
@@ -68,6 +81,13 @@ interface ComposerDraft {
   text: string;
   attachments: ImageAttachment[];
   fileReferences: WorkspaceFileReference[];
+}
+
+interface PromptOptimizationSnapshot {
+  originalText: string;
+  optimizedText: string;
+  selectionStart: number;
+  selectionEnd: number;
 }
 
 type WorkspaceReferenceEventDetail = {
@@ -129,12 +149,20 @@ const FALLBACK_SLASH_COMMANDS: Array<{
   { name: '/commit', descriptionKey: 'chat.slash.commit', categoryKey: 'chat.category.git', source: 'builtin' },
   { name: '/review', descriptionKey: 'chat.slash.review', categoryKey: 'chat.category.code', source: 'builtin' },
   { name: '/debug', descriptionKey: 'chat.slash.debug', categoryKey: 'chat.category.code', source: 'builtin' },
+  { name: '/test', descriptionKey: 'chat.slash.test', categoryKey: 'chat.category.code', source: 'builtin' },
+  { name: '/explain', descriptionKey: 'chat.slash.explain', categoryKey: 'chat.category.code', source: 'builtin' },
   { name: '/compact', descriptionKey: 'chat.slash.compact', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/clear', descriptionKey: 'chat.slash.clear', categoryKey: 'chat.category.session', source: 'builtin' },
   { name: '/tree', descriptionKey: 'chat.slash.tree', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/fork', descriptionKey: 'chat.slash.fork', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/new', descriptionKey: 'chat.slash.new', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/projects', descriptionKey: 'chat.slash.projects', categoryKey: 'chat.category.session', source: 'builtin' },
+  { name: '/memory', descriptionKey: 'chat.slash.memory', categoryKey: 'chat.category.runtime', source: 'builtin' },
 ];
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const PERMISSION_MODE_OPTIONS: PermissionMode[] = ['ask', 'acceptEdits', 'plan', 'bypassPermissions'];
+const PROMPT_OPTIMIZE_MODES: PromptOptimizeMode[] = ['auto', 'polish', 'execute', 'debug', 'review', 'research', 'ui', 'agent_room'];
 
 export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputProps) {
   const { t } = useI18n();
@@ -152,9 +180,14 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0);
   const [atTokenStart, setAtTokenStart] = useState(-1);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
+  const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false);
+  const [lastPromptOptimization, setLastPromptOptimization] = useState<PromptOptimizationSnapshot | null>(null);
+  const [promptOptimizeMode, setPromptOptimizeMode] = useState<PromptOptimizeMode>('auto');
+  const [showPromptOptimizeMenu, setShowPromptOptimizeMenu] = useState(false);
   const [openControlMenu, setOpenControlMenu] = useState<'model' | 'permission' | 'thinking' | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const promptOptimizeMenuRef = useRef<HTMLDivElement>(null);
   const controlBarRef = useRef<HTMLDivElement>(null);
   const searchRequestRef = useRef(0);
   const composingRef = useRef(false);
@@ -165,6 +198,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   const fileReferencesRef = useRef(fileReferences);
   const addToast = useUIStore((s) => s.addToast);
   const setRightPanel = useUIStore((s) => s.setRightPanel);
+  const setActiveView = useUIStore((s) => s.setActiveView);
   const runtimeSlashCommands = useUIStore((s) => s.slashCommands);
   const messages = useChatStore((s) => s.messagesBySession[sessionId] ?? EMPTY_MESSAGES);
   const activeSession = useChatStore((s) => s.sessions.find((session) => session.id === sessionId));
@@ -239,6 +273,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       setText(draft?.text ?? '');
       setAttachments(draft?.attachments ?? []);
       setFileReferences(draft?.fileReferences ?? []);
+      setLastPromptOptimization(null);
       currentSessionRef.current = sessionId;
     }
 
@@ -279,6 +314,25 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [openControlMenu]);
+
+  useEffect(() => {
+    if (!showPromptOptimizeMenu) return;
+
+    const close = (event: globalThis.MouseEvent) => {
+      if (promptOptimizeMenuRef.current?.contains(event.target as Node)) return;
+      setShowPromptOptimizeMenu(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setShowPromptOptimizeMenu(false);
+    };
+
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showPromptOptimizeMenu]);
 
   const addFileReference = useCallback((path: string, options?: {
     name?: string;
@@ -333,6 +387,23 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
 
     window.addEventListener(WORKSPACE_REFERENCE_EVENT, handleWorkspaceReference);
     return () => window.removeEventListener(WORKSPACE_REFERENCE_EVENT, handleWorkspaceReference);
+  }, [addFileReference, sessionId]);
+
+  useEffect(() => {
+    const dispose = window.piDesktop?.onWorkspaceReference((detail) => {
+      if (!detail?.path) return;
+      if (detail.sessionId && detail.sessionId !== sessionId) return;
+      addFileReference(detail.path, {
+        name: detail.name,
+        lineStart: detail.lineStart,
+        lineEnd: detail.lineEnd,
+        excerpt: detail.excerpt,
+        sourceKind: detail.sourceKind,
+      });
+      textareaRef.current?.focus();
+    });
+
+    return () => dispose?.();
   }, [addFileReference, sessionId]);
 
   useEffect(() => {
@@ -413,6 +484,9 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     const value = event.target.value;
     const cursorPos = event.target.selectionStart ?? value.length;
     setText(value);
+    if (lastPromptOptimization && value !== lastPromptOptimization.optimizedText) {
+      setLastPromptOptimization(null);
+    }
     if (!detectSlashTrigger(value, cursorPos)) {
       detectAtTrigger(value, cursorPos);
     }
@@ -422,10 +496,16 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     if (isPreparingPrompt || !canSubmit) return;
 
     const trimmed = text.trim();
+    if (attachments.length === 0 && fileReferences.length === 0 && await runWorkbenchSlashCommand(trimmed)) {
+      clearComposer();
+      closeFileSearch();
+      setShowSlashMenu(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
     const references = fileReferences;
-    const images = attachments.length > 0
-      ? attachments.map((attachment) => ({ data: attachment.data, mimeType: attachment.mimeType }))
-      : undefined;
+    const images = attachments.length > 0 ? attachments : undefined;
 
     setIsPreparingPrompt(true);
     try {
@@ -437,10 +517,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       const sent = onSend(modelText, images, displayText);
       if (sent === false) return;
 
-      setText('');
-      setAttachments([]);
-      setFileReferences([]);
-      draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+      clearComposer();
       closeFileSearch();
       setShowSlashMenu(false);
       textareaRef.current?.focus();
@@ -452,6 +529,48 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
       });
     } finally {
       setIsPreparingPrompt(false);
+    }
+  };
+
+  const clearComposer = () => {
+    setText('');
+    setAttachments([]);
+    setFileReferences([]);
+    setLastPromptOptimization(null);
+    draftsRef.current[sessionId] = { text: '', attachments: [], fileReferences: [] };
+  };
+
+  const runWorkbenchSlashCommand = async (value: string): Promise<boolean> => {
+    const command = value.split(/\s+/)[0]?.toLowerCase();
+    if (!command) return false;
+
+    switch (command) {
+      case '/projects': {
+        openProjectsLauncher();
+        addToast({ type: 'info', message: t('chat.command.projectsOpened') });
+        return true;
+      }
+      case '/new': {
+        await createNewSessionFromPicker();
+        return true;
+      }
+      case '/clear': {
+        const sent = piApi.send({ type: 'session_clear', sessionId });
+        if (!sent) {
+          addToast({
+            type: 'error',
+            message: t('chat.command.clearDisconnected'),
+            duration: 6000,
+          });
+          return true;
+        }
+        useChatStore.getState().clearMessages(sessionId);
+        useChatStore.getState().stopStreaming(sessionId);
+        addToast({ type: 'success', message: t('chat.command.cleared') });
+        return true;
+      }
+      default:
+        return false;
     }
   };
 
@@ -477,6 +596,10 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     const sent = piApi.send({ type: 'set_thinking_level', sessionId, level });
     if (!sent) {
       addToast({ type: 'error', message: t('chat.switchThinkingDisconnected') });
+      return;
+    }
+    if (activeSession) {
+      useChatStore.getState().updateSession({ ...activeSession, thinkingLevel: level, updatedAt: Date.now() });
     }
     setOpenControlMenu(null);
   };
@@ -512,6 +635,19 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === 'z' &&
+      lastPromptOptimization &&
+      text === lastPromptOptimization.optimizedText
+    ) {
+      event.preventDefault();
+      undoPromptOptimization();
+      return;
+    }
+
     if (showFileSearch) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -571,9 +707,59 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     }
   };
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+  const resolveDroppedWorkspaceReference = useCallback(async (
+    payload: WorkspaceFileDragPayload
+  ): Promise<{ path: string; name: string } | null> => {
+    if (payload.isDirectory) {
+      addToast({ type: 'warning', message: t('chat.workspaceDropFolderUnsupported') });
+      return null;
+    }
+
+    if (payload.sessionId === sessionId) {
+      return { path: payload.path, name: payload.name };
+    }
+
+    try {
+      const [sourceWorkspace, targetWorkspace] = await Promise.all([
+        piApi.getWorkspaceStatus(payload.sessionId),
+        piApi.getWorkspaceStatus(sessionId),
+      ]);
+
+      if (
+        sourceWorkspace.state === 'ok' &&
+        targetWorkspace.state === 'ok' &&
+        sameWorkspaceRoot(sourceWorkspace.workDir, targetWorkspace.workDir)
+      ) {
+        return { path: payload.path, name: payload.name };
+      }
+    } catch {
+      // Fall back to the existing different-session warning below.
+    }
+
+    addToast({ type: 'warning', message: t('chat.workspaceDropDifferentSession') });
+    return null;
+  }, [addToast, sessionId, t]);
+
+  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    void appendComposerFiles(Array.from(event.dataTransfer.files));
+    const workspacePayload = readWorkspaceFileDragPayload(event.dataTransfer);
+    if (workspacePayload) {
+      const reference = await resolveDroppedWorkspaceReference(workspacePayload);
+      if (reference) {
+        addFileReference(reference.path, { name: reference.name });
+        textareaRef.current?.focus();
+      }
+      return;
+    }
+
+    const plainPath = readPlainDroppedPath(event.dataTransfer);
+    if (plainPath) {
+      addFileReference(plainPath, { name: basename(plainPath) });
+      textareaRef.current?.focus();
+      return;
+    }
+
+    await appendComposerFiles(Array.from(event.dataTransfer.files));
   };
 
   const handleFileSelect = () => {
@@ -683,6 +869,146 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
     });
   };
 
+  const undoPromptOptimization = () => {
+    const snapshot = lastPromptOptimization;
+    if (!snapshot) return;
+
+    setText(snapshot.originalText);
+    setLastPromptOptimization(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    });
+    addToast({ type: 'info', message: t('chat.optimizePromptUndone') });
+  };
+
+  const optimizeComposerPrompt = async () => {
+    if (isOptimizingPrompt) return;
+
+    const sourceText = text.trim();
+    if (!sourceText) {
+      addToast({ type: 'warning', message: t('chat.optimizePromptEmpty') });
+      return;
+    }
+
+    const textarea = textareaRef.current;
+    const selectionStart = textarea?.selectionStart ?? 0;
+    const selectionEnd = textarea?.selectionEnd ?? 0;
+    const hasSelection = selectionEnd > selectionStart;
+    const selectedText = hasSelection ? text.slice(selectionStart, selectionEnd).trim() : '';
+    const targetText = selectedText || sourceText;
+
+    setIsOptimizingPrompt(true);
+    setShowPromptOptimizeMenu(false);
+    const optimizationContext = {
+      mode: promptOptimizeMode,
+      projectName: activeSession?.projectName,
+      projectPath: activeSession?.projectPath,
+      hasFileReferences: fileReferences.length > 0,
+      hasImages: attachments.length > 0,
+      fileReferences: buildPromptFileReferences(fileReferences),
+      imageReferences: buildPromptImageReferences(attachments),
+      sessionContext: buildPromptSessionContext(activeSession, messages),
+    };
+
+    try {
+      const workspaceContext = await collectPromptWorkspaceContext(sessionId);
+      const result = await piApi.optimizePrompt({
+        text: targetText,
+        ...optimizationContext,
+        workspaceContext,
+        language: detectPromptLanguage(targetText),
+        selectionOnly: hasSelection,
+        sessionId,
+        currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+      });
+      const optimized = result.optimized.trim();
+      if (!optimized) throw new Error(result.warning || t('chat.optimizePromptEmptyResult'));
+
+      let nextText = optimized;
+      let nextSelectionStart = optimized.length;
+      let nextSelectionEnd = optimized.length;
+      if (hasSelection && selectedText) {
+        const before = text.slice(0, selectionStart);
+        const after = text.slice(selectionEnd);
+        nextText = `${before}${optimized}${after}`;
+        nextSelectionStart = before.length;
+        nextSelectionEnd = before.length + optimized.length;
+      }
+
+      setLastPromptOptimization({
+        originalText: text,
+        optimizedText: nextText,
+        selectionStart,
+        selectionEnd,
+      });
+      setText(nextText);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(nextSelectionStart, nextSelectionEnd);
+      });
+
+      closeFileSearch();
+      setShowSlashMenu(false);
+      const promptOptimizedMessage = result.source === 'model'
+        ? t('chat.optimizePromptModelDone')
+        : t('chat.optimizePromptLocalDone');
+      addToast({
+        type: 'success',
+        message: promptOptimizedMessage || (hasSelection ? t('chat.optimizePromptSelectionDone') : t('chat.optimizePromptDone')),
+        duration: result.warning ? 6000 : undefined,
+      });
+    } catch (err) {
+      console.warn('[ChatInput] Prompt optimizer unavailable:', err);
+      addToast({
+        type: 'error',
+        message: t('chat.optimizePromptFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    } finally {
+      setIsOptimizingPrompt(false);
+    }
+  };
+
+  const launchAgentRoom = async () => {
+    const question = text.trim() || activeSession?.title || '';
+    if (!question) {
+      addToast({ type: 'warning', message: t('agentsRoom.questionRequired') });
+      return;
+    }
+
+    try {
+      const result = await piApi.createAgentRoom({
+        sessionId,
+        projectPath: activeSession?.projectPath,
+        question,
+        mode: 'balanced',
+        leftLabel: t('agentsRoom.defaultLeft'),
+        rightLabel: t('agentsRoom.defaultRight'),
+        neutralLabel: t('agentsRoom.defaultNeutral'),
+        debateRounds: 2,
+        useWorkspaceSearch: true,
+        useWebSearch: false,
+      });
+      useAgentRoomStore.getState().setSnapshot(result.snapshot);
+      useAgentRoomStore.getState().setActiveRoom(result.room.id);
+      setActiveView('agentRooms');
+      void piApi.startAgentRoomRun(result.room.id).then((runResult) => {
+        useAgentRoomStore.getState().upsertRoom(runResult.room);
+        useAgentRoomStore.getState().upsertRun(runResult.run);
+      });
+      setText('');
+      closeFileSearch();
+      setShowSlashMenu(false);
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('agentsRoom.createFailed', { message: err instanceof Error ? err.message : String(err) }),
+        duration: 6000,
+      });
+    }
+  };
+
   function closeFileSearch() {
     setShowFileSearch(false);
     setFileSearchFilter('');
@@ -691,22 +1017,37 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
   }
 
   return (
-    <div className="pi-composer-material border-t" onDrop={handleDrop} onDragOver={(event) => event.preventDefault()}>
+    <div
+      className="pi-composer-material relative z-[45] overflow-visible border-t"
+      onDrop={(event) => void handleDrop(event)}
+      onDragOver={(event) => {
+        event.preventDefault();
+        if (hasWorkspaceFileDragPayload(event.dataTransfer) || readPlainDroppedPath(event.dataTransfer)) {
+          event.dataTransfer.dropEffect = 'copy';
+        }
+      }}
+    >
       {(fileReferences.length > 0 || attachments.length > 0) && (
         <div className="flex items-center gap-2 px-3 pt-2 pb-1 flex-wrap">
           {fileReferences.map((ref) => (
             <div
               key={ref.id}
-              className="group inline-flex h-8 max-w-[260px] items-center gap-1.5 rounded-lg border border-pi-border/70 bg-pi-bg-tertiary/70 px-2 text-xs text-pi-muted"
+              className="group inline-flex h-10 max-w-[320px] items-center gap-2 rounded-2xl border border-pi-border/70 bg-pi-bg-secondary/80 px-2.5 text-xs text-pi-muted shadow-sm backdrop-blur-xl"
               title={ref.path}
             >
-              <FileText size={13} className="text-pi-accent flex-shrink-0" />
-              <span className="truncate">
-                {ref.path}{formatReferenceRange(ref)}
+              <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-xl border border-pi-accent/20 bg-pi-accent/10 text-pi-accent shadow-inner">
+                <FileText size={13} />
+              </span>
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate font-semibold text-pi-text">{ref.name || basename(ref.path)}</span>
+                <span className="block truncate text-[10px] text-pi-dim">
+                  {referenceDirectoryLabel(ref.path)}
+                  {formatReferenceRange(ref) && <span className="font-mono"> {formatReferenceRange(ref)}</span>}
+                </span>
               </span>
               <button
                 onClick={() => setFileReferences((prev) => prev.filter((item) => item.id !== ref.id))}
-                className="ml-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-pi-dim opacity-70 hover:bg-pi-bg-hover hover:text-pi-error group-hover:opacity-100"
+                className="ml-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-pi-dim opacity-70 transition-colors hover:bg-pi-bg-hover hover:text-pi-error group-hover:opacity-100"
                 title={t('chat.removeReference')}
               >
                 <X size={10} />
@@ -778,10 +1119,10 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         onOpenUsage={() => setRightPanel('usage')}
       />
 
-      <div className="flex items-end gap-2 px-3 pb-2 pt-1.5">
+      <div className="flex items-center gap-2 px-3 pb-2 pt-1.5">
         <button
           onClick={handleFileSelect}
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
+          className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl text-pi-dim transition-colors hover:bg-pi-bg-hover hover:text-pi-text"
           title={t('chat.attachImage')}
         >
           <Paperclip size={16} />
@@ -797,7 +1138,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         <button
           onClick={openFileSearchFromButton}
           className={cn(
-            'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border transition-colors',
+            'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border transition-colors',
             showFileSearch
               ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
               : 'border-transparent text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text'
@@ -807,9 +1148,89 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
           <AtSign size={16} />
         </button>
 
+        <div ref={promptOptimizeMenuRef} className="relative flex flex-shrink-0">
+          <button
+            onClick={optimizeComposerPrompt}
+            disabled={!text.trim() || isOptimizingPrompt || isPreparingPrompt}
+            className={cn(
+              'flex h-10 w-10 items-center justify-center rounded-l-xl border border-r-0 transition-colors',
+              text.trim() && !isOptimizingPrompt && !isPreparingPrompt
+                ? 'border-pi-accent/25 bg-pi-accent/10 text-pi-accent hover:bg-pi-accent/15'
+                : 'cursor-not-allowed border-transparent text-pi-dim opacity-60'
+            )}
+            title={`${t('chat.optimizePrompt')} · ${promptOptimizeModeLabel(promptOptimizeMode, t)}`}
+          >
+            {isOptimizingPrompt ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={16} />}
+          </button>
+          <button
+            onClick={() => setShowPromptOptimizeMenu((open) => !open)}
+            disabled={isOptimizingPrompt || isPreparingPrompt}
+            className={cn(
+              'flex h-10 w-7 items-center justify-center rounded-r-xl border transition-colors',
+              promptOptimizeMode !== 'auto' || showPromptOptimizeMenu
+                ? 'border-pi-accent/25 bg-pi-accent/10 text-pi-accent hover:bg-pi-accent/15'
+                : 'border-pi-accent/20 bg-pi-accent/5 text-pi-dim hover:bg-pi-bg-hover hover:text-pi-text',
+              (isOptimizingPrompt || isPreparingPrompt) && 'cursor-not-allowed opacity-60'
+            )}
+            title={t('chat.optimizePromptModeMenu')}
+          >
+            <ChevronDown size={13} />
+          </button>
+
+          {showPromptOptimizeMenu && (
+            <div className="pi-glass-menu absolute bottom-full left-0 z-[95] mb-2 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-lg">
+              <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">
+                {t('chat.optimizePromptModeMenu')}
+              </div>
+              <div className="max-h-[340px] overflow-y-auto py-1">
+                {PROMPT_OPTIMIZE_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => {
+                      setPromptOptimizeMode(mode);
+                      setShowPromptOptimizeMenu(false);
+                    }}
+                    className={cn(
+                      'flex w-full items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-pi-bg-hover',
+                      promptOptimizeMode === mode ? 'bg-pi-selected-bg text-pi-text' : 'text-pi-muted'
+                    )}
+                  >
+                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-pi-border/70 text-pi-accent">
+                      {promptOptimizeMode === mode ? <Check size={10} /> : null}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-pi-text">{promptOptimizeModeLabel(mode, t)}</span>
+                      <span className="block text-[10px] leading-relaxed text-pi-dim">{promptOptimizeModeDescription(mode, t)}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {lastPromptOptimization && text === lastPromptOptimization.optimizedText && (
+          <button
+            onClick={undoPromptOptimization}
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-transparent text-pi-dim transition-colors hover:border-pi-accent/25 hover:bg-pi-bg-hover hover:text-pi-text"
+            title={t('chat.optimizePromptUndo')}
+          >
+            <Undo2 size={15} />
+          </button>
+        )}
+
+        <button
+          onClick={() => void launchAgentRoom()}
+          disabled={isPreparingPrompt}
+          className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-transparent text-pi-dim transition-colors hover:border-pi-accent/25 hover:bg-pi-accent/10 hover:text-pi-accent disabled:cursor-not-allowed disabled:opacity-50"
+          title={t('agentsRoom.launchFromComposer')}
+        >
+          <Network size={16} />
+        </button>
+
         <div className="flex-1 relative">
           {showFileSearch && (
-            <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-lg">
+            <div className="pi-glass-menu absolute bottom-full left-0 right-0 z-[90] mb-2 overflow-hidden rounded-lg">
               <div className="flex h-8 items-center gap-2 border-b border-pi-border/70 px-3 text-xs text-pi-dim">
                 <Search size={13} className="flex-shrink-0" />
                 <span className="min-w-0 flex-1 truncate">
@@ -858,7 +1279,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             className="pi-glass-control w-full resize-none rounded-lg px-3 py-2
                        text-sm text-pi-text placeholder-pi-dim
                        focus:outline-none focus:border-pi-accent transition-colors
-                       min-h-[40px] max-h-[200px]"
+                       min-h-[40px] max-h-[200px] leading-6"
             style={{ fontFamily: 'inherit' }}
           />
         </div>
@@ -866,7 +1287,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
         {isStreaming && (
           <button
             onClick={onStop}
-            className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-pi-error/20 text-pi-error transition-colors hover:bg-pi-error/30"
+            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-pi-error/20 text-pi-error transition-colors hover:bg-pi-error/30"
             title={t('chat.stopGeneration')}
           >
             <Square size={14} fill="currentColor" />
@@ -878,7 +1299,7 @@ export function ChatInput({ onSend, onStop, isStreaming, sessionId }: ChatInputP
             onClick={() => void handleSend()}
             disabled={!canSubmit || isPreparingPrompt}
             className={cn(
-              'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg transition-colors',
+              'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl transition-colors',
               canSubmit && !isPreparingPrompt
                 ? 'bg-pi-accent text-white hover:bg-pi-accent/90'
                 : 'cursor-not-allowed bg-pi-bg-tertiary/70 text-pi-dim'
@@ -931,13 +1352,35 @@ function ComposerControlBar({
 }) {
   const { t } = useI18n();
   const selectedPermission = PERMISSION_MODE_OPTIONS.find((option) => option === permissionMode) ?? PERMISSION_MODE_OPTIONS[0]!;
+  const [compact, setCompact] = useState(false);
+
+  useEffect(() => {
+    const node = refEl.current;
+    if (!node) return;
+
+    const updateCompact = () => {
+      setCompact(node.clientWidth < 520);
+    };
+
+    updateCompact();
+
+    const observer = new ResizeObserver(updateCompact);
+    observer.observe(node);
+    window.addEventListener('resize', updateCompact);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateCompact);
+    };
+  }, [refEl]);
 
   return (
-    <div ref={refEl} className="relative flex items-center gap-1.5 px-3 pt-2">
+    <div ref={refEl} className="relative z-[70] flex min-w-0 items-center gap-1.5 px-3 pt-2">
       <ComposerControlButton
         icon={<Bot size={12} />}
         label={currentModel?.name ?? t('chat.noModel')}
         active={openMenu === 'model'}
+        compact={compact}
         title={t('chat.modelTitle')}
         onClick={() => onToggleMenu('model')}
       />
@@ -945,6 +1388,7 @@ function ComposerControlBar({
         icon={<Shield size={12} />}
         label={permissionModeLabel(selectedPermission, t)}
         active={openMenu === 'permission'}
+        compact={compact}
         tone={permissionMode === 'bypassPermissions' ? 'warning' : undefined}
         title={t('chat.permissionMode')}
         onClick={() => onToggleMenu('permission')}
@@ -953,14 +1397,16 @@ function ComposerControlBar({
         icon={<Brain size={12} />}
         label={thinkingLevelLabel(thinkingLevel, t)}
         active={openMenu === 'thinking'}
+        compact={compact}
         title={t('chat.thinkingLevel')}
         onClick={() => onToggleMenu('thinking')}
       />
-      {activeSession && <WorkspaceSwitcher activeSession={activeSession} placement="toolbar" />}
+      {activeSession && <WorkspaceSwitcher activeSession={activeSession} placement="toolbar" compact={compact} />}
       <button
         onClick={onOpenUsage}
         className={cn(
-          'flex h-7 min-w-0 max-w-[190px] flex-shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+          'flex h-7 min-w-0 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+          compact ? 'max-w-[76px]' : 'max-w-[190px]',
           contextUsage.percent > 85
             ? 'border-pi-error/40 bg-pi-error/10 text-pi-error'
             : contextUsage.percent > 65
@@ -974,7 +1420,7 @@ function ComposerControlBar({
       </button>
 
       {openMenu === 'model' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.modelTitle')}</div>
           <div className="max-h-[280px] overflow-y-auto py-1">
             {availableModels.length === 0 ? (
@@ -1004,7 +1450,7 @@ function ComposerControlBar({
       )}
 
       {openMenu === 'permission' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(320px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.permissionTitle')}</div>
           <div className="py-1">
             {PERMISSION_MODE_OPTIONS.map((option) => (
@@ -1028,7 +1474,7 @@ function ComposerControlBar({
       )}
 
       {openMenu === 'thinking' && (
-        <div className="pi-glass-menu absolute bottom-full left-3 z-50 mb-2 w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-lg">
+        <div className="pi-glass-menu absolute bottom-full left-3 z-[90] mb-2 w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-lg">
           <div className="border-b border-pi-border/70 px-3 py-2 text-[10px] font-semibold uppercase text-pi-dim">{t('chat.thinkingTitle')}</div>
           <div className="grid grid-cols-2 gap-1 p-2">
             {THINKING_LEVELS.map((level) => (
@@ -1057,6 +1503,7 @@ function ComposerControlButton({
   label,
   active,
   tone,
+  compact,
   title,
   onClick,
 }: {
@@ -1064,14 +1511,17 @@ function ComposerControlButton({
   label: string;
   active?: boolean;
   tone?: 'warning';
+  compact?: boolean;
   title: string;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
+      aria-label={title}
       className={cn(
-        'flex h-7 min-w-0 max-w-[180px] items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        'flex h-7 min-w-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors',
+        compact ? 'w-7 flex-shrink-0 px-0' : 'max-w-[180px]',
         active
           ? 'border-pi-accent/30 bg-pi-accent/10 text-pi-accent'
           : tone === 'warning'
@@ -1081,7 +1531,7 @@ function ComposerControlButton({
       title={title}
     >
       <span className="flex-shrink-0">{icon}</span>
-      <span className="truncate">{label}</span>
+      {!compact && <span className="truncate">{label}</span>}
     </button>
   );
 }
@@ -1192,6 +1642,36 @@ function normalizeWorkspacePath(value: string): string {
   return value.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
+function sameWorkspaceRoot(a: string, b: string): boolean {
+  return normalizeComparablePath(a) === normalizeComparablePath(b);
+}
+
+function normalizeComparablePath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/g, '');
+  return isWindowsLikePath(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function isWindowsLikePath(value: string): boolean {
+  return /^[a-zA-Z]:\//.test(value) || value.startsWith('//');
+}
+
+function readPlainDroppedPath(dataTransfer: DataTransfer | null): string | null {
+  if (!dataTransfer || !Array.from(dataTransfer.types).includes('text/plain')) return null;
+  if (dataTransfer.files.length > 0) return null;
+
+  const value = dataTransfer.getData('text/plain').trim();
+  if (!looksLikeWorkspacePath(value)) return null;
+  return value.replace(/^file:\/\//i, '').trim();
+}
+
+function looksLikeWorkspacePath(value: string): boolean {
+  if (!value || /[\r\n]/.test(value)) return false;
+  if (/^[a-z]+:\/\//i.test(value) && !/^file:\/\//i.test(value)) return false;
+  const normalized = value.replace(/^file:\/\//i, '').replace(/\\/g, '/');
+  const name = basename(normalized);
+  return normalized.includes('/') || /^[\w .@()[\]-]+\.[a-zA-Z0-9]{1,12}$/.test(name);
+}
+
 function normalizeLineNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
@@ -1218,6 +1698,13 @@ function basename(value: string): string {
   return normalized.split('/').filter(Boolean).pop() ?? normalized;
 }
 
+function referenceDirectoryLabel(value: string): string {
+  const normalized = normalizeWorkspacePath(value);
+  const parts = normalized.split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/') || normalized;
+}
+
 function escapeAttr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
@@ -1240,7 +1727,7 @@ function localizeFallbackSlashCommands(
 }
 
 function mergeSlashCommands(commands: SlashCommandInfo[], fallbackCommands: SlashCommandInfo[]): SlashCommandInfo[] {
-  const merged = [...commands, ...fallbackCommands];
+  const merged = [...fallbackCommands, ...commands];
   const seen = new Set<string>();
   const result: SlashCommandInfo[] = [];
 
@@ -1299,6 +1786,7 @@ function messageTextLength(message: ChatMessage): number {
   const contentChars = message.content.reduce((total, part) => {
     if (part.type === 'text') return total + (part.text?.length ?? 0);
     if (part.type === 'thinking') return total + (part.thinking?.content.length ?? 0);
+    if (part.type === 'image') return total + Math.ceil((part.image?.data.length ?? 0) * 0.75);
     if (part.type === 'tool_use') return total + JSON.stringify(part.toolUse?.args ?? {}).length;
     if (part.type === 'tool_result') return total + (part.toolResult?.content.length ?? 0);
     return total;
@@ -1331,4 +1819,97 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function detectPromptLanguage(input: string): 'zh' | 'en' | 'ja' {
+  if (/[\u3040-\u30ff]/.test(input)) return 'ja';
+  return /[\u3400-\u9fff]/.test(input) ? 'zh' : 'en';
+}
+
+function promptOptimizeModeLabel(
+  mode: PromptOptimizeMode,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  return t(`chat.optimizePromptMode.${mode}.label` as TranslationKey);
+}
+
+function promptOptimizeModeDescription(
+  mode: PromptOptimizeMode,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): string {
+  return t(`chat.optimizePromptMode.${mode}.description` as TranslationKey);
+}
+
+function buildPromptFileReferences(references: WorkspaceFileReference[]): PromptOptimizeFileReference[] | undefined {
+  if (references.length === 0) return undefined;
+  return references.slice(0, 12).map((reference) => ({
+    path: reference.path,
+    name: reference.name,
+    lineStart: reference.lineStart,
+    lineEnd: reference.lineEnd,
+    excerpt: reference.excerpt ? truncateInline(reference.excerpt, 1600) : undefined,
+  }));
+}
+
+function buildPromptImageReferences(attachments: ImageAttachment[]): PromptOptimizeImageReference[] | undefined {
+  if (attachments.length === 0) return undefined;
+  return attachments.slice(0, 6).map((attachment, index) => ({
+    fileName: attachment.fileName ?? `image-${index + 1}`,
+    mimeType: attachment.mimeType,
+  }));
+}
+
+function buildPromptSessionContext(
+  activeSession: Session | undefined,
+  messages: ChatMessage[]
+): PromptOptimizeSessionContext | undefined {
+  const recent = [...messages].reverse();
+  const lastUserMessage = recent.find((message) => message.role === 'user');
+  const lastAssistantMessage = recent.find((message) => message.role === 'assistant');
+  const context: PromptOptimizeSessionContext = {
+    title: activeSession?.title,
+    lastUserMessage: lastUserMessage ? truncateInline(messagePlainText(lastUserMessage), 900) : undefined,
+    lastAssistantSummary: lastAssistantMessage ? truncateInline(messagePlainText(lastAssistantMessage), 900) : undefined,
+  };
+  return context.title || context.lastUserMessage || context.lastAssistantSummary ? context : undefined;
+}
+
+async function collectPromptWorkspaceContext(sessionId: string): Promise<PromptOptimizeWorkspaceContext | undefined> {
+  try {
+    const status = await piApi.getWorkspaceStatus(sessionId);
+    if (status.state !== 'ok' && status.state !== 'not_git_repo') return undefined;
+    const changedFiles = status.changedFiles.slice(0, 30).map((file) => ({
+      path: file.path,
+      status: [
+        file.staged ? 'staged' : '',
+        file.unstaged ? 'unstaged' : '',
+        file.status,
+      ].filter(Boolean).join(' '),
+    }));
+    return {
+      branch: status.branch ?? undefined,
+      dirty: Boolean(status.hasStagedChanges || status.hasUnstagedChanges || changedFiles.length > 0),
+      changedFiles: changedFiles.length > 0 ? changedFiles : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function messagePlainText(message: ChatMessage): string {
+  const parts = message.content.map((part) => {
+    if (part.type === 'text') return part.text ?? '';
+    if (part.type === 'thinking') return part.thinking?.content ?? '';
+    if (part.type === 'tool_result') return part.toolResult?.content ?? '';
+    if (part.type === 'image') return `[image:${part.image?.fileName ?? part.image?.mimeType ?? 'attached'}]`;
+    if (part.type === 'tool_use') return `[tool:${part.toolUse?.name ?? 'unknown'}]`;
+    return '';
+  });
+  return parts.join('\n').trim();
+}
+
+function truncateInline(value: string, maxLength: number): string {
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }

@@ -1,4 +1,4 @@
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
@@ -31,6 +31,7 @@ async function main() {
       PORT: String(port),
       PI_AGENT_RUNTIME: process.env.PI_AGENT_RUNTIME || 'mock',
       PI_DESKTOP_DATA_DIR: dataDir,
+      PI_AGENT_DIR: path.join(dataDir, 'agent'),
       PI_DESKTOP_AUTH_TOKEN: smokeToken,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -46,10 +47,15 @@ async function main() {
     await assertUnauthorized(`http://127.0.0.1:${port}/api/auth/status`);
     await assertDiagnostics(`http://127.0.0.1:${port}/api/diagnostics`);
     const authStatus = await assertAuthStatus(`http://127.0.0.1:${port}/api/auth/status`);
-    await assertAuthTest(`http://127.0.0.1:${port}/api/auth/test`, authStatus.providers[0]?.id ?? 'anthropic');
-    await runProtocolSmoke(`ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(smokeToken)}`);
-    await assertProjectLaunchApi(`http://127.0.0.1:${port}`);
-    await assertPermissionRules(`http://127.0.0.1:${port}`);
+    const smokeProvider = authStatus.providers[0]?.id ?? 'anthropic';
+    await assertProviderEndpointConfig(`http://127.0.0.1:${port}`, smokeProvider);
+    await assertAuthTest(`http://127.0.0.1:${port}/api/auth/test`, smokeProvider);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const wsUrl = `ws://127.0.0.1:${port}/ws?token=${encodeURIComponent(smokeToken)}`;
+    await runProtocolSmoke(wsUrl);
+    await assertProjectLaunchApi(baseUrl);
+    await assertWorkspaceChangeApi(baseUrl, wsUrl);
+    await assertPermissionRules(baseUrl);
     console.log('Protocol smoke passed');
   } catch (err) {
     console.error(logs.slice(-80).join('\n'));
@@ -92,6 +98,21 @@ async function assertAuthTest(url, provider) {
   }
 }
 
+async function assertProviderEndpointConfig(baseUrl, provider) {
+  const endpoint = 'https://proxy.example.com/v1';
+  const saved = await postJson(`${baseUrl}/api/auth/provider-config`, { provider, baseUrl: endpoint });
+  const savedProvider = saved.providers?.find((item) => item.id === provider);
+  if (savedProvider?.baseUrl !== endpoint || !saved.modelsJsonPath) {
+    throw new Error(`Expected provider endpoint to be saved, got: ${JSON.stringify(savedProvider ?? saved).slice(0, 300)}`);
+  }
+
+  const removed = await deleteJson(`${baseUrl}/api/auth/provider-config?provider=${encodeURIComponent(provider)}`);
+  const removedProvider = removed.providers?.find((item) => item.id === provider);
+  if (removedProvider?.baseUrl) {
+    throw new Error(`Expected provider endpoint to be cleared, got: ${JSON.stringify(removedProvider).slice(0, 300)}`);
+  }
+}
+
 async function runProtocolSmoke(url) {
   const ws = new WebSocket(url);
   let sessionId;
@@ -110,6 +131,7 @@ async function runProtocolSmoke(url) {
   let awaitingSessionThinking = false;
   let autoTitleUpdated = false;
   let terminalSmokeSeen = false;
+  let awaitingClear = false;
   const terminalId = 'terminal-smoke';
 
   await withTimeout(new Promise((resolve, reject) => {
@@ -119,7 +141,8 @@ async function runProtocolSmoke(url) {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'connected') {
-        if (!Array.isArray(msg.slashCommands) || !msg.slashCommands.some((command) => command.name === '/review')) {
+        const slashNames = new Set((msg.slashCommands ?? []).map((command) => command.name));
+        if (!['/review', '/projects', '/new', '/clear'].every((name) => slashNames.has(name))) {
           reject(new Error(`Expected connected message to include slash commands, got: ${JSON.stringify(msg.slashCommands).slice(0, 200)}`));
           return;
         }
@@ -275,7 +298,14 @@ async function runProtocolSmoke(url) {
         && forkReceived
         && autoTitleUpdated
         && terminalSmokeSeen
+        && !awaitingClear
       ) {
+        awaitingClear = true;
+        ws.send(JSON.stringify({ type: 'session_clear', sessionId }));
+        return;
+      }
+
+      if (msg.type === 'session_cleared' && msg.sessionId === sessionId && awaitingClear) {
         ws.close();
         resolve();
       }
@@ -319,6 +349,94 @@ async function assertProjectLaunchApi(baseUrl) {
   if (contextBody.state === 'ok' && (!Array.isArray(contextBody.branches) || !contextBody.repoRoot)) {
     throw new Error(`Expected Git repository context details, got: ${JSON.stringify(contextBody).slice(0, 300)}`);
   }
+}
+
+async function assertWorkspaceChangeApi(baseUrl, wsUrl) {
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-agent-workspace-smoke-'));
+  try {
+    runGit(repoDir, ['init']);
+    runGit(repoDir, ['config', 'user.email', 'pi-agent-smoke@example.com']);
+    runGit(repoDir, ['config', 'user.name', 'Pi Agent Smoke']);
+    runGit(repoDir, ['config', 'core.autocrlf', 'false']);
+    runGit(repoDir, ['config', 'core.safecrlf', 'false']);
+    fs.writeFileSync(path.join(repoDir, 'tracked.txt'), 'one\n', 'utf8');
+    runGit(repoDir, ['add', 'tracked.txt']);
+    runGit(repoDir, ['commit', '-m', 'initial']);
+
+    const sessionId = await createSmokeSession(wsUrl, repoDir);
+    const search = await getJson(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/search?q=${encodeURIComponent('trtxt')}`);
+    if (search.state !== 'ok' || !search.files?.some((file) => file.path === 'tracked.txt')) {
+      throw new Error(`Expected fuzzy workspace search to find tracked.txt, got: ${JSON.stringify(search).slice(0, 300)}`);
+    }
+
+    fs.writeFileSync(path.join(repoDir, 'tracked.txt'), 'one\ntwo\n', 'utf8');
+
+    const status = await getJson(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/status`);
+    const trackedChange = status.changedFiles?.find((file) => file.path === 'tracked.txt');
+    if (trackedChange?.status !== 'modified') {
+      throw new Error(`Expected modified tracked.txt, got: ${JSON.stringify(status).slice(0, 300)}`);
+    }
+
+    const accepted = await postJson(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/change`, {
+      action: 'accept',
+      path: 'tracked.txt',
+      status: 'modified',
+    });
+    if (accepted.state !== 'ok' || !accepted.statusResult) {
+      throw new Error(`Expected workspace accept operation to succeed, got: ${JSON.stringify(accepted).slice(0, 300)}`);
+    }
+    if (runGit(repoDir, ['diff', '--cached', '--name-only']).trim() !== 'tracked.txt') {
+      throw new Error('Expected accepted change to be staged.');
+    }
+
+    const discarded = await postJson(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/change`, {
+      action: 'discard',
+      path: 'tracked.txt',
+      status: 'modified',
+    });
+    if (discarded.state !== 'ok' || fs.readFileSync(path.join(repoDir, 'tracked.txt'), 'utf8') !== 'one\n') {
+      throw new Error(`Expected workspace discard operation to restore tracked.txt, got: ${JSON.stringify(discarded).slice(0, 300)}`);
+    }
+
+    fs.writeFileSync(path.join(repoDir, 'scratch.txt'), 'scratch\n', 'utf8');
+    const removed = await postJson(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/change`, {
+      action: 'discard',
+      path: 'scratch.txt',
+      status: 'untracked',
+    });
+    if (removed.state !== 'ok' || fs.existsSync(path.join(repoDir, 'scratch.txt'))) {
+      throw new Error(`Expected workspace discard operation to remove untracked scratch.txt, got: ${JSON.stringify(removed).slice(0, 300)}`);
+    }
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+}
+
+function createSmokeSession(url, projectPath) {
+  const ws = new WebSocket(url);
+  return withTimeout(new Promise((resolve, reject) => {
+    ws.on('open', () => undefined);
+    ws.on('error', reject);
+    ws.on('message', (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'connected') {
+        ws.send(JSON.stringify({ type: 'session_create', projectPath }));
+      }
+      if (msg.type === 'session_created') {
+        ws.close();
+        resolve(msg.session.id);
+      }
+    });
+  }), timeoutMs, 'Timed out waiting for workspace smoke session');
+}
+
+function runGit(cwd, args) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
 }
 
 function getJson(url) {
@@ -385,6 +503,41 @@ function postJson(url, body) {
       req.destroy(new Error(`Timed out posting ${url}`));
     });
     req.end(payload);
+  });
+}
+
+function deleteJson(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: 'DELETE',
+      headers: authHeaders(),
+    }, (res) => {
+      let responseBody = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        responseBody += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`DELETE ${url} failed with ${res.statusCode}: ${responseBody.slice(0, 200)}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(responseBody));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(3000, () => {
+      req.destroy(new Error(`Timed out deleting ${url}`));
+    });
+    req.end();
   });
 }
 

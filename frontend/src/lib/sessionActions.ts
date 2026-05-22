@@ -1,6 +1,12 @@
 import { piApi } from '../api/client';
 import { useUIStore } from '../stores/uiStore';
 
+export const OPEN_PROJECTS_EVENT = 'pi:open-projects';
+
+export function openProjectsLauncher(): void {
+  window.dispatchEvent(new Event(OPEN_PROJECTS_EVENT));
+}
+
 export async function createNewSessionFromPicker(): Promise<void> {
   try {
     const projectPath = window.piDesktop

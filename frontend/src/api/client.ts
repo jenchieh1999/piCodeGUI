@@ -3,15 +3,33 @@
 // ============================================================
 
 import type {
+  AgentRoomCreateInput,
+  AgentRoomSnapshot,
   AgentConfig,
   AgentInput,
+  AgentLearningRecord,
   PermissionAuditEntry,
   PermissionRule,
+  PromptOptimizeInput,
+  PromptOptimizeResult,
   AuthProviderTestResult,
   ChannelConfig,
   ChannelInput,
+  ChannelPairingResult,
   ChannelTestResult,
+  ChannelWechatQrStartResult,
+  ChannelWechatQrStatusResult,
+  ExtensionResourceSnapshot,
+  PackageResourceFilter,
+  ResourceTrustDecision,
+  ResourceTrustKind,
+  WorkspaceChangeOperationResult,
+  WorkspaceCopyFileResult,
+  WorkspaceDeleteFileResult,
   WorkspaceDiffResult,
+  WorkspaceGitOperationAction,
+  WorkspaceGitOperationResult,
+  WorkspaceMoveFileResult,
   WorkspaceReadFileResult,
   WorkspaceSearchResult,
   WorkspaceStatusResult,
@@ -21,6 +39,9 @@ import type {
   RecentProject,
   RepositoryContextResult,
   ServerDiagnostics,
+  SkillHubItem,
+  SkillHubSearchResult,
+  SkillHubStatus,
   WsClientMessage,
   WsServerMessage,
 } from '../types';
@@ -30,6 +51,8 @@ import { useExtensionStore } from '../stores/extensionStore';
 import { useUIStore } from '../stores/uiStore';
 import { useConnectionStore } from '../stores/connectionStore';
 import { useSettingsStore } from '../stores/settingsStore';
+import { useTerminalStore } from '../stores/terminalStore';
+import { useAgentRoomStore } from '../stores/agentRoomStore';
 
 type MessageHandler = (msg: WsServerMessage) => void;
 
@@ -113,7 +136,7 @@ class PiApiClient {
     }
 
     try {
-      const ws = new WebSocket(this.getWebSocketUrl());
+      const ws = new WebSocket(this.getWebSocketUrl(), this.getWebSocketProtocols());
       this.ws = ws;
 
       ws.onopen = () => {
@@ -200,6 +223,9 @@ class PiApiClient {
         if (msg.messagesBySession) {
           chatStore.setMessagesBySession(msg.messagesBySession);
         }
+        if (msg.agentRooms) {
+          useAgentRoomStore.getState().setSnapshot(msg.agentRooms);
+        }
         if (!chatStore.activeSessionId && msg.sessions.length > 0) {
           chatStore.setActiveSession(msg.sessions[0]!.id);
         }
@@ -216,8 +242,23 @@ class PiApiClient {
         if (msg.extensions) {
           useExtensionStore.getState().setExtensions(msg.extensions);
         }
+        if (msg.skills) {
+          useExtensionStore.getState().setSkills(msg.skills);
+        }
+        if (msg.prompts) {
+          useExtensionStore.getState().setPrompts(msg.prompts);
+        }
         if (msg.themes) {
           useExtensionStore.getState().setThemes(msg.themes);
+        }
+        if (msg.resourceDiagnostics) {
+          useExtensionStore.getState().setDiagnostics(msg.resourceDiagnostics);
+        }
+        if (msg.marketplace) {
+          useExtensionStore.getState().setMarketplace(msg.marketplace);
+        }
+        if (msg.trust) {
+          useExtensionStore.getState().setTrust(msg.trust);
         }
         if (msg.runtimeInfo) {
           useConnectionStore.getState().setRuntimeInfo(msg.runtimeInfo);
@@ -247,6 +288,12 @@ class PiApiClient {
       }
       case 'session_deleted': {
         useChatStore.getState().removeSession(msg.sessionId);
+        break;
+      }
+      case 'session_cleared': {
+        const chatStore = useChatStore.getState();
+        chatStore.clearMessages(msg.sessionId);
+        chatStore.stopStreaming(msg.sessionId);
         break;
       }
       case 'status': {
@@ -290,9 +337,6 @@ class PiApiClient {
       }
       case 'tool_use': {
         useChatStore.getState().addToolUse(msg.sessionId, msg.toolCall);
-        if (this.isWorkspaceMutationTool(msg.toolCall.name)) {
-          useUIStore.getState().setRightPanel('changes');
-        }
         break;
       }
       case 'tool_result': {
@@ -331,6 +375,30 @@ class PiApiClient {
         useExtensionStore.getState().setExtensions(msg.extensions);
         break;
       }
+      case 'skills_updated': {
+        useExtensionStore.getState().setSkills(msg.skills);
+        break;
+      }
+      case 'prompts_updated': {
+        useExtensionStore.getState().setPrompts(msg.prompts);
+        break;
+      }
+      case 'resource_diagnostics_updated': {
+        useExtensionStore.getState().setDiagnostics(msg.diagnostics);
+        break;
+      }
+      case 'marketplace_updated': {
+        useExtensionStore.getState().setMarketplace(msg.marketplace);
+        break;
+      }
+      case 'resource_trust_updated': {
+        useExtensionStore.getState().setTrust(msg.trust);
+        break;
+      }
+      case 'package_progress': {
+        useExtensionStore.getState().pushPackageProgress(msg.progress);
+        break;
+      }
       case 'themes_updated': {
         useExtensionStore.getState().setThemes(msg.themes);
         break;
@@ -351,12 +419,91 @@ class PiApiClient {
         break;
       }
       case 'file_changes': {
-        useUIStore.getState().setRightPanel('changes');
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('pi:workspace-changed', {
             detail: { sessionId: msg.sessionId, changes: msg.changes },
           }));
         }
+        break;
+      }
+      case 'terminal_started': {
+        useTerminalStore.getState().markStarted({
+          terminalId: msg.terminalId,
+          sessionId: msg.sessionId,
+          cwd: msg.cwd,
+          shell: msg.shell,
+          backend: msg.backend,
+        });
+        break;
+      }
+      case 'terminal_output': {
+        useTerminalStore.getState().appendOutput(msg.terminalId, msg.data);
+        break;
+      }
+      case 'terminal_exited': {
+        useTerminalStore.getState().markExited(msg.terminalId, msg.exitCode, msg.signal);
+        break;
+      }
+      case 'terminal_error': {
+        if (msg.terminalId) {
+          useTerminalStore.getState().markError(msg.terminalId, msg.message, msg.sessionId);
+        }
+        break;
+      }
+      case 'agent_room_snapshot': {
+        useAgentRoomStore.getState().setSnapshot(msg.snapshot);
+        break;
+      }
+      case 'agent_room_created': {
+        useAgentRoomStore.getState().upsertRoom(msg.room);
+        break;
+      }
+      case 'agent_room_updated': {
+        useAgentRoomStore.getState().upsertRoom(msg.room);
+        break;
+      }
+      case 'agent_room_deleted': {
+        useAgentRoomStore.getState().removeRoom(msg.roomId);
+        break;
+      }
+      case 'agent_room_run_started': {
+        const store = useAgentRoomStore.getState();
+        store.upsertRoom(msg.room);
+        store.upsertRun(msg.run);
+        store.setActiveRoom(msg.room.id);
+        break;
+      }
+      case 'agent_room_run_updated': {
+        const store = useAgentRoomStore.getState();
+        store.upsertRoom(msg.room);
+        store.upsertRun(msg.run);
+        break;
+      }
+      case 'agent_room_run_failed': {
+        const store = useAgentRoomStore.getState();
+        store.upsertRoom(msg.room);
+        store.upsertRun(msg.run);
+        useUIStore.getState().addToast({ type: 'error', message: msg.message, duration: 6000 });
+        break;
+      }
+      case 'agent_room_run_cancelled': {
+        const store = useAgentRoomStore.getState();
+        store.upsertRoom(msg.room);
+        store.upsertRun(msg.run);
+        break;
+      }
+      case 'agent_room_message_added': {
+        useAgentRoomStore.getState().addMessage(msg.message);
+        break;
+      }
+      case 'agent_room_artifact_added':
+      case 'agent_room_final_report_ready': {
+        useAgentRoomStore.getState().addArtifact(msg.artifact);
+        break;
+      }
+      case 'agent_room_task_started':
+      case 'agent_room_task_completed': {
+        useAgentRoomStore.getState().upsertTask(msg.task);
         break;
       }
       case 'error': {
@@ -371,13 +518,6 @@ class PiApiClient {
 
     // Forward to all registered handlers
     this.handlers.forEach((handler) => handler(msg));
-  }
-
-  private isWorkspaceMutationTool(toolName: string): boolean {
-    const normalized = toolName.toLowerCase();
-    return ['edit', 'write', 'multi_edit', 'create', 'delete', 'move', 'rename'].some((name) =>
-      normalized.includes(name)
-    );
   }
 
   send(msg: WsClientMessage): boolean {
@@ -423,6 +563,14 @@ class PiApiClient {
     return this.isConnected;
   }
 
+  async optimizePrompt(input: PromptOptimizeInput) {
+    return this.request<PromptOptimizeResult>('/api/prompt/optimize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
   async getWorkspaceStatus(sessionId: string) {
     return this.request<WorkspaceStatusResult>(`/api/sessions/${encodeURIComponent(sessionId)}/workspace/status`);
   }
@@ -445,6 +593,67 @@ class PiApiClient {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, content }),
+      }
+    );
+  }
+
+  async deleteWorkspacePath(sessionId: string, path: string) {
+    return this.request<WorkspaceDeleteFileResult>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace/file?path=${encodeURIComponent(path)}`,
+      {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      }
+    );
+  }
+
+  async moveWorkspacePath(sessionId: string, sourcePath: string, targetDirectory: string) {
+    return this.request<WorkspaceMoveFileResult>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace/move`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourcePath, targetDirectory }),
+      }
+    );
+  }
+
+  async copyWorkspacePath(sessionId: string, sourcePath: string, targetDirectory: string) {
+    return this.request<WorkspaceCopyFileResult>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace/copy`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourcePath, targetDirectory }),
+      }
+    );
+  }
+
+  async applyWorkspaceChange(
+    sessionId: string,
+    input: { action: 'accept' | 'discard' | 'unstage'; path: string; oldPath?: string; status?: string }
+  ) {
+    return this.request<WorkspaceChangeOperationResult>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace/change`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  async applyWorkspaceGitOperation(
+    sessionId: string,
+    input: { action: WorkspaceGitOperationAction; message?: string }
+  ) {
+    return this.request<WorkspaceGitOperationResult>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace/git`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
       }
     );
   }
@@ -485,6 +694,20 @@ class PiApiClient {
 
   async removeProviderApiKey(provider: string) {
     return this.request<AuthStatusResult>(`/api/auth/api-key?provider=${encodeURIComponent(provider)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async saveProviderConfig(provider: string, baseUrl: string) {
+    return this.request<AuthStatusResult>('/api/auth/provider-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, baseUrl }),
+    });
+  }
+
+  async removeProviderConfig(provider: string) {
+    return this.request<AuthStatusResult>(`/api/auth/provider-config?provider=${encodeURIComponent(provider)}`, {
       method: 'DELETE',
     });
   }
@@ -549,8 +772,166 @@ class PiApiClient {
     });
   }
 
+  async createChannelPairing(id: string) {
+    return this.request<ChannelPairingResult>(`/api/channels/${encodeURIComponent(id)}/pairing`, {
+      method: 'POST',
+    });
+  }
+
+  async startWechatQrLogin(id: string) {
+    return this.request<ChannelWechatQrStartResult>(`/api/channels/${encodeURIComponent(id)}/wechat-qr/start`, {
+      method: 'POST',
+    });
+  }
+
+  async getWechatQrLoginStatus(id: string, sessionKey: string, verifyCode?: string) {
+    return this.request<ChannelWechatQrStatusResult>(`/api/channels/${encodeURIComponent(id)}/wechat-qr/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey, verifyCode }),
+    });
+  }
+
   async getDiagnostics() {
     return this.request<ServerDiagnostics>('/api/diagnostics');
+  }
+
+  async getExtensionResources(projectPath?: string) {
+    const query = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
+    return this.request<ExtensionResourceSnapshot>(`/api/extensions/resources${query}`);
+  }
+
+  async reloadExtensionResources(projectPath?: string) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/reload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPath }),
+    });
+  }
+
+  async installPackage(source: string, scope: 'user' | 'project', projectPath?: string) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/packages/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, scope, projectPath, trustConfirmed: true }),
+    });
+  }
+
+  async removePackage(source: string, scope: 'user' | 'project', projectPath?: string) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/packages/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, scope, projectPath }),
+    });
+  }
+
+  async updatePackage(source?: string, projectPath?: string) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/packages/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, projectPath }),
+    });
+  }
+
+  async setPackageFilter(source: string, filter: PackageResourceFilter | undefined, scope: 'user' | 'project', projectPath?: string) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/packages/filter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, filter, scope, projectPath }),
+    });
+  }
+
+  async setPackageEnabled(source: string, enabled: boolean, scope: 'user' | 'project', projectPath?: string) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/packages/enabled', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, enabled, scope, projectPath }),
+    });
+  }
+
+  async createSkill(input: { name: string; description?: string; body?: string; scope: 'user' | 'project'; projectPath?: string }) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/skills/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async createPackage(input: {
+    name: string;
+    description?: string;
+    skillName?: string;
+    skillDescription?: string;
+    scope: 'user' | 'project';
+    projectPath?: string;
+  }) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/packages/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async setResourceTrust(input: {
+    kind: ResourceTrustKind;
+    id?: string;
+    name?: string;
+    source?: string;
+    path?: string;
+    decision: ResourceTrustDecision;
+    reason?: string;
+    projectPath?: string;
+  }) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/trust', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async getSkillContent(path: string, projectPath?: string) {
+    const query = new URLSearchParams({ path });
+    if (projectPath) query.set('projectPath', projectPath);
+    return this.request<{ path: string; content: string }>(`/api/extensions/skills/content?${query.toString()}`);
+  }
+
+  async getSkillHubStatus() {
+    return this.request<SkillHubStatus>('/api/extensions/skillhub/status');
+  }
+
+  async saveSkillHubConfig(input: {
+    endpoint?: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+    defaultProvider?: 'clawhub' | 'skillhub';
+  }) {
+    return this.request<SkillHubStatus>('/api/extensions/skillhub/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async searchSkillHub(input: {
+    query?: string;
+    limit?: number;
+    projectPath?: string;
+    provider?: 'clawhub' | 'skillhub';
+  }) {
+    const query = new URLSearchParams();
+    if (input.query) query.set('q', input.query);
+    if (input.limit) query.set('limit', String(input.limit));
+    if (input.projectPath) query.set('projectPath', input.projectPath);
+    if (input.provider) query.set('provider', input.provider);
+    return this.request<SkillHubSearchResult>(`/api/extensions/skillhub/search?${query.toString()}`);
+  }
+
+  async installSkillHubItem(input: { item: SkillHubItem; scope: 'user' | 'project'; projectPath?: string }) {
+    return this.request<ExtensionResourceSnapshot>('/api/extensions/skillhub/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
   }
 
   async getAgents() {
@@ -575,6 +956,70 @@ class PiApiClient {
 
   async deleteAgent(id: string) {
     return this.request<{ deleted: boolean }>(`/api/agents/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getAgentLearnings(projectPath?: string) {
+    const query = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
+    return this.request<{ learnings: AgentLearningRecord[] }>(`/api/agents/learnings${query}`);
+  }
+
+  async createAgentLearning(input: {
+    type?: AgentLearningRecord['type'];
+    title?: string;
+    content: string;
+    projectPath?: string;
+    agentId?: string;
+    tags?: string[];
+  }) {
+    return this.request<{ learning: AgentLearningRecord }>('/api/agents/learnings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async getAgentRooms() {
+    return this.request<AgentRoomSnapshot>('/api/agent-rooms');
+  }
+
+  async createAgentRoom(input: AgentRoomCreateInput) {
+    return this.request<{ room: AgentRoomSnapshot['rooms'][number]; snapshot: AgentRoomSnapshot }>('/api/agent-rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async updateAgentRoom(roomId: string, input: Partial<AgentRoomCreateInput>) {
+    return this.request<{ room: AgentRoomSnapshot['rooms'][number] }>(`/api/agent-rooms/${encodeURIComponent(roomId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  }
+
+  async startAgentRoomRun(roomId: string) {
+    return this.request<{
+      room: AgentRoomSnapshot['rooms'][number];
+      run: AgentRoomSnapshot['runsByRoom'][string][number];
+    }>(`/api/agent-rooms/${encodeURIComponent(roomId)}/runs`, {
+      method: 'POST',
+    });
+  }
+
+  async cancelAgentRoomRun(roomId: string, runId: string) {
+    return this.request<{
+      room: AgentRoomSnapshot['rooms'][number];
+      run: AgentRoomSnapshot['runsByRoom'][string][number];
+    }>(`/api/agent-rooms/${encodeURIComponent(roomId)}/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  async deleteAgentRoom(roomId: string) {
+    return this.request<{ deleted: boolean }>(`/api/agent-rooms/${encodeURIComponent(roomId)}`, {
       method: 'DELETE',
     });
   }
@@ -609,10 +1054,11 @@ class PiApiClient {
   }
 
   private getWebSocketUrl(): string {
-    if (!this.authToken) return this.url;
-    const url = new URL(this.url);
-    url.searchParams.set('token', this.authToken);
-    return url.toString();
+    return this.url;
+  }
+
+  private getWebSocketProtocols(): string[] | undefined {
+    return this.authToken ? ['pi-agent.v1', `pi-agent-token.${this.authToken}`] : undefined;
   }
 }
 

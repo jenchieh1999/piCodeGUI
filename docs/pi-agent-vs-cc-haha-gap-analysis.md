@@ -1,5 +1,31 @@
 # Pi Agent Desktop 与 cc-haha 差距分析
 
+## 0.8 2026-05-20 Multi-Agent / SubAgents 与自我进步能力更新
+
+本轮参考 ClawHub `subagent-driven-development` 与 `self-improving-agent` 的设计方向，开始把 Pi Agent Desktop 从“单 Agent + 频道路由”推进到“可配置多 Agent 编排”的阶段。当前落地重点是先保证主链路稳定：不直接引入高风险的真实并行 runtime 会话，而是在现有 Pi SDK prompt 链路前增加可审计、可配置的编排层。
+
+- `AgentConfig` 已扩展 `role`、`parentAgentId`、`subAgent`、`selfImprovement` 字段，支持 planner / implementer / reviewer / tester / documenter / researcher 等角色。
+- 服务端新增 `agent-orchestration-service`：普通请求保持原样；复杂实现、修复、调试、测试、审查、发布、迁移、架构类请求会自动判断是否需要 SubAgents，并注入多 Agent 编排策略。
+- 当用户未配置 SubAgents 时，系统会启用轻量虚拟角色（Planner / Implementer / Reviewer / Tester / Documenter）作为编排提示，不阻塞现有桌面端体验。
+- 服务端新增 `agent-learning-service`，支持项目级 `.pi/learnings/agent-learnings.json` 与 `agent-learnings.md` 持久化，失败、纠正、偏好、工作流和洞察都可以记录。
+- Runtime 错误与用户纠正类反馈会自动捕捉为 learning；用户也可以在 Agents 页面手动写入自我进步经验。
+- Agents 页面已升级为多 Agent 编排台：展示 SubAgent、自我进步、自动规划能力概览；编辑器支持角色、父级 Agent、自动委派、触发词、并行上限、审查门禁、输出契约、自我进步开关。
+
+当前与 cc-haha / ClawX 的差距进一步收敛：Agent profile 不再只是频道人格绑定，而开始具备任务拆分、角色化协作、经验沉淀的桌面端能力。剩余差距主要在真实并行子会话、子 Agent 结果可视化、拖拽式 Agent DAG、失败回放、学习记录审核/提升为 Skill 这几块。自评分从 **98/100** 提升到 **98.5/100**；Multi-Agent 子能力当前约 **6.5/10**，已经进入可用 MVP，但距离完整 SubAgent runtime 仍有明显 P1 空间。
+
+## 0.7 2026-05-20 Workspace 主链路更新：file-level accept/discard 闭环
+
+本轮继续对齐 `NanmiCoder/cc-haha` 主线里“右侧 Workspace 不只是看 diff，而是能直接处理改动”的开发工作台体验。Pi Agent Desktop 已补齐首个可交付级变更处理闭环：
+
+- 服务端新增 `POST /api/sessions/:id/workspace/change`，支持 `accept` 与 `discard` 两类操作，并复用当前 session 的真实 workspace。
+- `accept` 会对目标文件执行 `git add`，重命名文件会同时处理 old/new path，用于把 AI 生成的改动明确纳入用户认可范围。
+- `discard` 会对 tracked 文件执行 `git restore --source=HEAD --staged --worktree`，对 untracked 文件执行安全删除；所有路径都经过 workspace 内部路径校验，避免越界删除。
+- 右侧 Changes 列表的每个文件行新增两个轻量按钮：接受/暂存、丢弃；丢弃前有确认，操作后会刷新 workspace 状态与当前 diff/file preview。
+- API 类型、前端 client、中文/英文/日文 i18n 已同步补齐。
+- `server:smoke` 增加临时 Git 仓库回归：修改 tracked 文件、accept 后验证 staged、discard 后验证恢复；同时覆盖 untracked 文件 discard 删除链路。
+
+本轮后 Workspace 编辑闭环从 **6/10** 提升到 **8/10**：已经从“只能观察 diff”推进到“可以对文件级改动做处理”。剩余关键差距集中在 hunk-level accept/reject、工具结果内联 diff block、行级 comment/选区浮层、组件级视觉回归测试。整体发布质量自评分从 **97/100** 提升到 **98/100**。
+
 ## 0.6 2026-05-19 发布工程更新：自动更新主链路落地
 
 本轮补齐桌面端正式发布体验里最关键的“自动更新”主链路，使 Pi Agent Desktop 不再停留在“能打包”阶段，而是具备接近 cc-haha/updater 体验的检查、下载、安装闭环：
@@ -232,10 +258,10 @@
 | 选区加入聊天 | 已支持行号选择范围加入聊天 | 支持选区浮层/行评论 | P1 |
 | 行评论 | 尚无 inline comment editor | 支持 line comment to chat | P1 |
 | 文件右键菜单 | 尚弱 | add to chat、copy path 等 | P1 |
-| hunk accept/reject | 尚无 | 更接近完整 diff 工作流 | P0 |
+| hunk accept/reject | 已支持 file-level accept/stage 与 discard，hunk-level 尚无 | 更接近完整 diff 工作流 | P1 |
 | FS watch | 轮询/事件刷新 | 更实时的 workspace state | P1 |
 
-结论：Workspace 已是当前最接近 cc-haha 的区域之一。剩余差距集中在“编辑型操作”：hunk 采纳/拒绝、Markdown/代码高亮、行评论、文件右键菜单、真实 watcher。
+结论：Workspace 已是当前最接近 cc-haha 的区域之一。file-level 采纳/丢弃已经落地，剩余差距集中在更细粒度的“编辑型操作”：hunk 采纳/拒绝、工具结果内联 diff、行评论、文件右键菜单、真实 watcher。
 
 ### 4.5 权限系统
 
@@ -260,12 +286,12 @@
 | Provider Test | 本地 auth/model registry 轻量测试 | 更完整 provider/proxy/live smoke | P1 |
 | 模型目录 | 从 Pi SDK ModelRegistry 读取 | 更完整 provider/model role mapping | P1 |
 | per-session model | 尚不完整 | 支持 runtimeKey/session 维度 | P0 |
-| Proxy/baseURL | 尚无 UI | 支持 proxy/baseURL/provider presets | P0 |
+| Proxy/baseURL | 已支持 provider baseURL 配置与诊断，proxy/preset 仍需加强 | 支持 proxy/baseURL/provider presets | P1 |
 | OAuth | 尚无 | 有相关入口/能力 | P1 |
 | MCP/Memory/Skills/Plugins | 有扩展 UI 骨架 | cc-haha 更完整 | P1 |
 | Diagnostics 聚合 | 分散在状态栏/桌面诊断/设置页 | 更系统 | P1 |
 
-结论：Provider 基础闭环已成型，但离 cc-haha 的“复杂环境可配置”还有距离，尤其是 baseURL/proxy、per-session runtime config 和更强诊断。
+结论：Provider 基础闭环已成型，baseURL 主链路已经补齐；离 cc-haha 的“复杂环境可配置”仍有 proxy preset、OAuth、per-session runtime config 和更强诊断差距。
 
 ### 4.7 消息、工具调用与可视化
 
@@ -285,7 +311,7 @@
 
 | 对比项 | 当前 Pi Agent Desktop | cc-haha | 差距等级 |
 | --- | --- | --- | --- |
-| 内置 Terminal | 已有轻量 shell Terminal；缺 true PTY/xterm/resize | xterm + PTY | P1 |
+| 内置 Terminal | 已有右侧 xterm + PTY/ConPTY、resize、底部/独立窗口入口 | xterm + PTY | 基本拉平 |
 | Terminal settings | 无 | 有 | P1 |
 | 计划任务 | 无 | 有 task/schedule 相关能力 | P2 |
 | Teams/成员状态 | 无 | 有 team watcher/member transcripts | P2 |
@@ -293,7 +319,7 @@
 | H5/远程访问 | 无 | 有 token/CORS/远程页面 | P2 |
 | IM/通知 | 基础 toast/桌面诊断 | 更完整 | P2 |
 
-结论：如果目标是“开发工作台不输 cc-haha”，Terminal 是 P0；Teams、Computer Use、H5 可以后置，不应阻塞核心 coding agent 桌面体验。
+结论：Terminal 主链路已经从 P0 风险收敛为体验增强项；后续重点是多 tab、profile、搜索、主题字体联动。Teams、Computer Use、H5 可以后置，不应阻塞核心 coding agent 桌面体验。
 
 ### 4.9 测试与质量门禁
 
@@ -321,10 +347,10 @@
 | 动态 slash command | 已由服务端下发并与 fallback 合并，仍未接真实 runtime 命令源 | 从 runtime/extensions 拉取 slash commands，并与 fallback 合并 |
 | Composer 内模型/权限/上下文用量 | 已能直接切模型/权限/thinking 并查看 context pressure | 输入器内可直接切模型、切权限、看 context pressure |
 | Repository/branch/worktree 启动控件 | 目录选择较基础 | 新会话可选最近项目、分支、是否创建 worktree |
-| Workspace hunk/edit 操作 | 只能看 diff | 支持至少 file-level/hunk-level accept/reject 或等价工作流 |
+| Workspace hunk/edit 操作 | 已支持 file-level accept/stage 与 discard；hunk-level 尚未落地 | 支持 hunk-level accept/reject 或等价工作流 |
 | 工具结果 diff block | 文件编辑后靠右栏看 | edit/write 工具结果直接展示 changed files/diff summary |
 | 嵌入式 Terminal | 已有右侧 xterm + PTY/ConPTY，可跟当前 workspace 绑定 | 右侧或底部有 PTY terminal，可跟当前 workspace 绑定 |
-| Provider baseURL/proxy | 缺失 | provider 可配置 baseURL/proxy，并有测试/错误诊断 |
+| Provider baseURL/proxy | baseURL 主链路已支持；proxy preset/OAuth 仍需完善 | provider 可配置 baseURL/proxy，并有测试/错误诊断 |
 | 组件/Store/API 测试 | 很少 | ChatInput、RightPanel、Permission、Provider、workspace API 有回归测试 |
 
 ### P1：接近 cc-haha 质感需要补
@@ -383,3 +409,51 @@
 - Workspace 文件读取和文本附件 inline 仍需更强的安全/大小策略，避免误塞敏感或超大内容。
 - 前端交互复杂度已经上升，但组件测试还没跟上。
 - Vite 大 chunk warning 已消除；后续风险转为保持懒加载边界，避免新功能再次把 Shiki/Mermaid/大型语法包塞回首包。
+
+## 2026-05-20 差距收敛：扩展、包、技能中心 P1/P2
+
+参考 cc-haha、ClawX/OpenClaw 的桌面端体验后，本轮已把 Pi Agent Desktop 的“扩展中心”从入口级 UI 推进到可用闭环。
+
+| 对比项 | 当前 Pi Agent Desktop | 剩余目标体验 | 优先级 |
+| --- | --- | --- | --- |
+| 包安装 | 已接 `DefaultPackageManager`，支持 npm/git/local 安装、卸载、更新、进度和错误反馈 | 增加更多 fixture/e2e，覆盖异常回滚 | P1 |
+| 技能加载 | 已接 `DefaultResourceLoader`，`SKILL.md` 进入列表、预览和 `/skill:name` 命令体系 | 增加技能编辑保存、导入迁移向导 | P1/P2 |
+| 扩展加载 | 已展示 SDK extension、tools、commands、shortcuts、flags、加载错误 | 增加扩展 widget 插槽协议 | P2 |
+| Prompt 模板 | SDK prompt templates 已进入 slash command 快照 | 增加模板预览和参数表单 | P2 |
+| 运行时联动 | `PiAgentRuntime` 已传入 `DefaultResourceLoader`，资源变化影响下一轮 agent 行为 | 更细的 session resume/fork 资源版本追踪 | P1 |
+| 资源诊断 | 包页和扩展页都有 diagnostics 面板 | 诊断聚合到统一 Diagnostics 中心 | P1 |
+| 安全信任 | 已有资源 Trust Center，可标记 trusted/untrusted/blocked，blocked package 会停用 | 加入签名校验、沙箱、安装前 trust policy | P1/P2 |
+| Marketplace | 已有本地模板市场和一键安装 | 远程索引、评分、版本兼容、签名验证 | P2 |
+| 可视化创建器 | 已支持创建 skill 和 local package scaffold | 图形化 frontmatter、模板库、依赖文件管理 | P2 |
+
+本轮后扩展/包/技能中心自评分：
+
+- P0 真实资源闭环：**9.0/10**
+- P1 可管理与可诊断：**8.4/10**
+- P2 超越参考项目能力：**6.8/10**
+
+整体发布质量自评分从 **98/100** 提升到 **98.5/100**。剩余差距主要在远程 marketplace、签名/沙箱、资源级 agent/channel/task 绑定、扩展 widget 协议和系统化 e2e 覆盖。
+
+专项方案见：[pi-agent-extension-package-skill-implementation-plan.md](./pi-agent-extension-package-skill-implementation-plan.md)。
+
+## 2026-05-20 新增差距收敛：Provider baseURL/proxy 与 Electron/Tauri 桌面壳决策
+
+本轮继续对齐 cc-haha 级发布体验，优先补齐复杂网络环境下的 Provider 配置能力，并完成 Electron 过渡壳是否迁移到 Tauri 的工程判断。
+
+### 已补齐能力：Provider baseURL/proxy 主链路
+
+- 后端新增 `pi-server/agent-paths.ts`，统一 `PI_AGENT_DIR`、`auth.json`、`models.json` 路径，避免 auth、model catalog、runtime session 使用不同配置源。
+- `/api/auth/provider-config` 新增保存/清除 provider baseURL 能力，写入 Pi SDK 原生支持的 `models.json`。
+- `model-catalog.ts` 与 `pi-agent-runtime.ts` 已改为读取同一个 `models.json`，保存 proxy 后刷新 provider catalog 即可生效。
+- 设置页“凭据”模块新增 API endpoint/proxy 输入、应用、清除、状态 badge 和 `models.json` 错误提示。
+- `protocol-smoke` 新增 provider endpoint 保存/清除回归，并设置临时 `PI_AGENT_DIR`，避免 smoke 写入用户真实 `~/.pi/agent`。
+
+这使 Pi Agent Desktop 在企业代理、OpenAI/Anthropic 兼容网关、自建模型入口等场景上更接近 cc-haha 的复杂环境可用性。
+
+### Electron 到 Tauri 的结论
+
+短期不建议立即迁移。当前 Electron 壳已承载 server sidecar、动态端口、鉴权、托盘、窗口状态、独立工具窗口、多标签拆分/合并、PTY 终端、自动更新与 packaged smoke。迁移到 Tauri 不是替换 WebView，而是重建桌面运行时。
+
+Tauri 的优势仍然明确：更小体积、更强 capability 权限模型、系统 WebView、签名 updater。但 Pi Agent 的核心 SDK 与 package/extension/skill 链路仍依赖 Node/TypeScript/npm/git，本质上仍需要 Node sidecar 或自包含 server binary。当前更合理路线是继续用 Electron 拉平 cc-haha 交互差距，同时单独开 Tauri feasibility spike。
+
+完整评估见：[electron-to-tauri-migration-assessment.md](./electron-to-tauri-migration-assessment.md)。

@@ -4,6 +4,7 @@ import { useExtensionStore, useSettingsStore } from '../stores';
 import { SETTINGS_BROADCAST_CHANNEL, SETTINGS_STORAGE_KEY } from '../stores/settingsStore';
 
 const CUSTOM_THEMES_STORAGE_KEY = 'pi-desktop-custom-themes';
+const HIDDEN_THEMES_STORAGE_KEY = 'pi-desktop-hidden-themes';
 
 export function useStandaloneRuntimeSettings(): void {
   const theme = useSettingsStore((s) => s.theme);
@@ -25,7 +26,11 @@ export function useStandaloneRuntimeSettings(): void {
     };
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === SETTINGS_STORAGE_KEY || event.key === CUSTOM_THEMES_STORAGE_KEY) {
+      if (
+        event.key === SETTINGS_STORAGE_KEY
+        || event.key === CUSTOM_THEMES_STORAGE_KEY
+        || event.key === HIDDEN_THEMES_STORAGE_KEY
+      ) {
         reloadRuntimePreferences();
       }
     };

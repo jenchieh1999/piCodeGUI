@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ChatMessage, PermissionRequest, Session, TokenUsage, ToolResult, ToolUse } from '../types';
+import type { ChatMessage, ImageAttachment, MessageContent, PermissionRequest, Session, TokenUsage, ToolResult, ToolUse } from '../types';
 
 let localMessageCounter = 0;
 
@@ -50,7 +50,7 @@ interface ChatState {
   addMessage: (sessionId: string, message: ChatMessage) => void;
   updateMessage: (sessionId: string, messageId: string, updates: Partial<ChatMessage>) => void;
   clearMessages: (sessionId: string) => void;
-  addUserMessage: (sessionId: string, text: string) => void;
+  addUserMessage: (sessionId: string, text: string, images?: ImageAttachment[]) => void;
   startAssistantMessage: (sessionId: string, messageId: string) => void;
   appendAssistantText: (sessionId: string, delta: string) => void;
   startThinking: (sessionId: string) => void;
@@ -132,22 +132,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       messagesBySession: { ...s.messagesBySession, [sessionId]: [] },
     })),
-  addUserMessage: (sessionId, text) =>
-    set((s) => ({
-      messagesBySession: {
-        ...s.messagesBySession,
-        [sessionId]: [
-          ...(s.messagesBySession[sessionId] ?? []),
-          {
-            id: nextMessageId('user'),
-            sessionId,
-            role: 'user',
-            content: [{ type: 'text', text }],
-            timestamp: Date.now(),
-          },
-        ],
-      },
-    })),
+  addUserMessage: (sessionId, text, images) =>
+    set((s) => {
+      const content: MessageContent[] = [];
+      if (text.trim()) {
+        content.push({ type: 'text', text });
+      }
+      for (const image of images ?? []) {
+        content.push({ type: 'image', image });
+      }
+
+      return {
+        messagesBySession: {
+          ...s.messagesBySession,
+          [sessionId]: [
+            ...(s.messagesBySession[sessionId] ?? []),
+            {
+              id: nextMessageId('user'),
+              sessionId,
+              role: 'user',
+              content,
+              timestamp: Date.now(),
+            },
+          ],
+        },
+      };
+    }),
   startAssistantMessage: (sessionId, messageId) =>
     set((s) => {
       const currentId = s.streamingSessionId === sessionId ? s.streamingMessageId : null;
